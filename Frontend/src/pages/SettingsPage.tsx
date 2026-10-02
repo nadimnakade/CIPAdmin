@@ -80,7 +80,7 @@ export default function SettingsPage() {
     setEmpMsg(null);
     try {
       await api.put(`/api/cibil/employee-limits/${empCode}`, { monthlyLimit: n });
-      setEmpMsg({ kind: 'ok', text: `Limit ${n} saved for employee ${empCode}. Takes effect within 60 seconds.` });
+      setEmpMsg({ kind: 'ok', text: `Limit ${n} saved for employee ${empCode}. This replaces their default outright — it can be lower as well as higher.` });
       setEmpEdits((e) => { const c = { ...e }; delete c[empCode]; return c; });
       loadEmpLimits(empSearch);
     } catch (err) {
@@ -115,7 +115,7 @@ export default function SettingsPage() {
     try {
       await api.put('/api/settings/monthly-pull-limit', { monthlyPullLimit: n });
       setSavedLimit(n);
-      setMessage({ kind: 'ok', text: `Default monthly pull limit set to ${n}. Takes effect within 60 seconds.` });
+      setMessage({ kind: 'ok', text: `Default monthly pull limit set to ${n}. It applies immediately — affected employees see the new number the next time they load the CIBIL page.` });
     } catch (err) {
       setMessage({
         kind: 'err',

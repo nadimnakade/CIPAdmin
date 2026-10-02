@@ -11,7 +11,17 @@ export interface NavGroup {
   icon?: string;
   to?: string;
   end?: boolean;
+  /** True when `to` is an off-site URL — rendered as a plain <a target="_blank">
+   *  instead of a react-router <NavLink>, which would treat it as a route path. */
+  external?: boolean;
   children?: NavGroup[];
+}
+
+/** A menu path is "external" when it's an absolute http(s) URL. */
+export function isExternalUrl(path?: string | null): boolean {
+  if (!path) return false;
+  const p = path.trim().toLowerCase();
+  return p.startsWith('http://') || p.startsWith('https://');
 }
 
 /** Fallback used when the menu API is unavailable (e.g. older backend). */
@@ -90,6 +100,7 @@ export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
             label: n.label,
             icon: n.icon ?? undefined,
             to: n.path ?? undefined,
+            external: isExternalUrl(n.path),
             children: n.children?.length ? map(n.children) : undefined,
           }));
         const translated = map(nodes);

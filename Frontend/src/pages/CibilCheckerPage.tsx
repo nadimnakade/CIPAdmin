@@ -21,6 +21,8 @@ interface QuotaInfo {
   remaining: number;
   effectiveLimit: number;
   approvedLimit: string | null;
+  /** Server says a new pull would be refused (403) — lock the request form. */
+  blocked: boolean;
 }
 
 interface LimitRequestInfo {
@@ -41,6 +43,22 @@ interface GenerateResponse {
   downloadUrl: string;
   message: string;
   quota?: QuotaInfo | null;
+}
+
+/// One pull event made by the signed-in user — backs the "My Reports" section.
+/// Cached and legacy serves appear here too, because they count as pulls.
+interface MyPullRow {
+  logId: number;
+  reportId: number | null;
+  panNo: string;
+  applicantName: string | null;
+  reportType: string;
+  source: string;
+  locationName: string | null;
+  centerManager: string | null;
+  fileName: string | null;
+  pullDate: string;
+  pullTime: string;
 }
 
 const thisMonthKey = () => {
@@ -67,6 +85,7 @@ export default function CibilCheckerPage() {
 
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [myRequests, setMyRequests] = useState<LimitRequestInfo[]>([]);
+  const [myReports, setMyReports] = useState<MyPullRow[]>([]);
   const [showRequestPanel, setShowRequestPanel] = useState(false);
   const [reqLimit, setReqLimit] = useState('');
   const [reqReason, setReqReason] = useState('');
@@ -79,9 +98,30 @@ export default function CibilCheckerPage() {
   const refreshQuota = useCallback(() => {
     api.get<QuotaInfo>('/api/cibil/quota').then(setQuota).catch(() => {});
     api.get<LimitRequestInfo[]>('/api/cibil/my-limit-requests').then(setMyRequests).catch(() => {});
+    api.get<{ total: number; rows: MyPullRow[] }>('/api/cibil/my-reports')
+      .then((d) => setMyReports(d.rows))
+      .catch(() => {});
   }, []);
 
   useEffect(() => { refreshQuota(); }, [refreshQuota]);
+
+  // An admin can change a limit while this page sits open, and the quota is only ever
+  // read on mount — so the "0 / 10" chip would stay stale indefinitely. Re-read it
+  // when the tab regains focus and on a slow poll, and refresh the moment an admin
+  // raises this user's cap so the form unlocks without a manual reload.
+  useEffect(() => {
+    const onFocus = () => refreshQuota();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refreshQuota();
+    }, 60_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+      window.clearInterval(poll);
+    };
+  }, [refreshQuota]);
 
   // Surface the limit-request panel automatically when this month's pulls are used up.
   useEffect(() => {
@@ -115,6 +155,13 @@ export default function CibilCheckerPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (loading) return; // Enter-key resubmit guard (disabled button alone doesn't block this)
+    // A disabled <fieldset> stops clicks and typing but NOT Enter-to-submit in every
+    // browser, so the out-of-quota case is re-checked here as well.
+    if (quotaBlocked) {
+      setMessage({ kind: 'err', text: `Monthly pull limit reached (${quota!.used} / ${quota!.effectiveLimit}). Request a limit increase to continue.` });
+      setShowRequestPanel(true);
+      return;
+    }
     setMessage(null);
     setShowRequestPanel(false);
 
@@ -143,6 +190,9 @@ export default function CibilCheckerPage() {
       await showPdf(res.report.reportId, res.report.fileName, false);
       setPanOnFile(res.source === 'CACHE' || res.source === 'LEGACY');
       if (res.quota) setQuota(res.quota);
+      // The response quota already includes this pull (the server logs the event
+      // before building it); re-read the ledger so "My Reports" picks up the new row.
+      refreshQuota();
 
       if (res.source === 'CACHE' || res.source === 'LEGACY') {
         setMessage({ kind: 'ok', text: res.message });
@@ -207,6 +257,7 @@ export default function CibilCheckerPage() {
       await showPdf(res.report.reportId, res.report.fileName, false);
       if (res.quota) setQuota(res.quota);
       setPanOnFile(true);
+      refreshQuota();
       setMessage({ kind: 'ok', text: res.message });
     } catch (err) {
       setMessage({ kind: 'err', text: err instanceof ApiError ? err.message : 'Regeneration failed' });
@@ -215,7 +266,26 @@ export default function CibilCheckerPage() {
     }
   };
 
+  const downloadMy = async (reportId: number, fileName: string) => {
+    try {
+      const blob = await fetchReportPdf(reportId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) {
+      setMessage({ kind: 'err', text: e instanceof Error ? e.message : 'Download failed' });
+    }
+  };
+
   const quotaPct = quota && quota.effectiveLimit > 0 ? Math.min(100, Math.round((quota.used / quota.effectiveLimit) * 100)) : 0;
+
+  // Admins are exempt from the cap. Everyone else is locked out once the server
+  // says the allowance is spent, so the form greys out instead of letting them
+  // fill it in and then bounce off a 403.
+  const quotaBlocked = !!quota && !isAdmin && (quota.blocked || quota.remaining <= 0);
 
   return (
     <div className="page page-narrow">
@@ -224,7 +294,7 @@ export default function CibilCheckerPage() {
         <p className="page-sub">Enter details below to generate a CIBIL PDF report</p>
       </div>
 
-      {quota && (
+      {quota && !isAdmin && (
         <div className="quota-chip card">
           <div className="quota-text">
             <span className="quota-count"><b>{quota.used}</b> / {quota.effectiveLimit}</span>
@@ -241,9 +311,20 @@ export default function CibilCheckerPage() {
         </div>
       )}
 
+      {quotaBlocked && (
+        <div className="alert warn" style={{ marginBottom: 12 }}>
+          <b>Monthly pull limit reached ({quota!.used} / {quota!.effectiveLimit}).</b>{' '}
+          The CIBIL request form is disabled until an admin raises your limit or the
+          new month starts. {pendingRequest
+            ? <>Your request for <b>{pendingRequest.requestedLimit} pulls</b> is pending approval.</>
+            : 'Use “Request Limit Increase” below to ask for more.'}
+        </div>
+      )}
+
       <form className="card form-card" onSubmit={submit}>
-        {/* Fields lock while a pull is in flight — no edits or re-submits mid-generation. */}
-        <fieldset className="form-fields" disabled={loading}>
+        {/* Fields lock while a pull is in flight, and stay locked all month once the
+            allowance is spent — no edits or re-submits mid-generation. */}
+        <fieldset className="form-fields" disabled={loading || quotaBlocked}>
         <label className="field">
           <span className="field-label">FULL NAME</span>
           <input
@@ -306,8 +387,10 @@ export default function CibilCheckerPage() {
 
         {message && <div className={`alert ${message.kind}`}>{message.text}</div>}
 
-        <button className="btn primary full" disabled={loading}>
-          {loading ? (<><span className="spinner" aria-hidden /> Generating report — please wait…</>) : 'Generate Report'}
+        <button className="btn primary full" disabled={loading || quotaBlocked}>
+          {loading
+            ? (<><span className="spinner" aria-hidden /> Generating report — please wait…</>)
+            : quotaBlocked ? 'Limit reached — request an increase below' : 'Generate Report'}
         </button>
         </fieldset>
 
@@ -374,6 +457,58 @@ export default function CibilCheckerPage() {
                   <td><span className={'badge ' + (r.status === 'Approved' ? 'green' : 'gray')}>{r.status}</span></td>
                   <td>{r.approvedLimit ?? '—'}</td>
                   <td>{r.decidedByName || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {myReports.length > 0 && (
+        <div className="card my-reports">
+          <div className="card-head">
+            <h3>My Reports</h3>
+            <span className="scope-chip">{myReports.length} pull{myReports.length === 1 ? '' : 's'}</span>
+          </div>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>PAN</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Location</th>
+                <th>CIBIL Pull Date</th>
+                <th>CIBIL Pull Time</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {myReports.map((r) => (
+                <tr key={r.logId}>
+                  <td>{r.applicantName || '—'}</td>
+                  <td className="mono">{r.panNo}</td>
+                  <td><span className="badge blue">{r.reportType}</span></td>
+                  <td>
+                    <span className={'badge ' + (r.source === 'API' || r.source === 'REGEN' ? 'green' : 'gray')}>
+                      {r.source}
+                    </span>
+                  </td>
+                  <td>{r.locationName || '—'}</td>
+                  <td>{r.pullDate}</td>
+                  <td className="mono">{r.pullTime}</td>
+                  <td>
+                    {r.reportId ? (
+                      <button
+                        className="btn small"
+                        onClick={() => downloadMy(r.reportId as number, r.fileName || `${r.panNo}.pdf`)}
+                      >
+                        Download
+                      </button>
+                    ) : (
+                      <span className="empty">—</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -86,7 +86,10 @@ public class CibilController : ControllerBase
     [HttpGet("quota")]
     public async Task<ActionResult<QuotaInfo>> Quota()
     {
-        return Ok(await _cibil.GetQuotaAsync(EmpCode, EmpName));
+        var q = await _cibil.GetQuotaAsync(EmpCode, EmpName);
+        // Admins are exempt from the monthly cap, so never tell the UI to lock them out.
+        if (IsAdmin) q.Blocked = false;
+        return Ok(q);
     }
 
     /// <summary>Submit a request to raise the current user's monthly pull limit.</summary>
@@ -251,6 +254,88 @@ public class CibilController : ControllerBase
             rows,
             scope = new { isAdmin = scope.IsAdmin, subtreeSize = scope.SubtreeSize }
         });
+    }
+
+    /// <summary>Excel export of the reports grid. Applies the same filters and the same
+    /// hierarchy scope as GET /api/cibil/reports, and exports the FULL filtered set
+    /// rather than the page the user is looking at.
+    ///
+    /// CIBIL Pull Date is written as a real date cell and CIBIL Pull Time as a real time
+    /// cell, so Excel's own Data &gt; Sort orders rows chronologically. Writing them as
+    /// text would sort alphabetically and put 01-Apr-2026 after 31-Dec-2025.</summary>
+    [HttpGet("reports/export")]
+    public async Task<IActionResult> ExportReports([FromQuery] string? reportType = null,
+        [FromQuery] DateTime? from = null, [FromQuery] DateTime? to = null, [FromQuery] string? search = null)
+    {
+        const int maxRows = 50_000;
+        var scope = await _hierarchy.GetScopeAsync(EmpCode, RoleId);
+        var rows = await _cibil.ListAsync(reportType, from, to, search, scope.IsAdmin ? null : scope.SubtreeCodes);
+
+        if (rows.Count > maxRows)
+            return StatusCode(413, new
+            {
+                error = $"This export would contain {rows.Count:N0} rows (limit {maxRows:N0}). Narrow the date range or filters and try again."
+            });
+
+        var table = new DataTable();
+        table.Columns.Add("Report ID", typeof(int));
+        table.Columns.Add("Applicant Name", typeof(string));
+        table.Columns.Add("PAN", typeof(string));
+        table.Columns.Add("Mobile", typeof(string));
+        table.Columns.Add("Report Type", typeof(string));
+        table.Columns.Add("Source", typeof(string));
+        table.Columns.Add("Location", typeof(string));
+        table.Columns.Add("Center Manager", typeof(string));
+        table.Columns.Add("CIBIL Pull Date", typeof(DateTime));   // real date cell => sorts chronologically
+        table.Columns.Add("CIBIL Pull Time", typeof(TimeSpan));   // real time cell
+        table.Columns.Add("File Name", typeof(string));
+        table.Columns.Add("File Size (bytes)", typeof(long));
+
+        foreach (var r in rows)
+        {
+            table.Rows.Add(
+                r.ReportId,
+                (object?)r.ApplicantName ?? "",
+                r.PanNo,
+                (object?)r.Mobile ?? "",
+                r.ReportType,
+                r.Source,
+                (object?)r.LocationName ?? "",
+                (object?)r.CenterManager ?? "",
+                r.PulledDate.Date,
+                r.PulledDate.TimeOfDay,
+                r.FileName,
+                r.FileSize ?? 0L);
+        }
+
+        var bytes = ExcelExporter.BuildXlsx(table, "CIBIL Reports");
+        var name = $"CIBIL_Reports_{DateTime.Now:yyyy-MM-dd_HHmmss}.xlsx";
+        return File(bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            name);
+    }
+
+    /// <summary>Admin: how many CIBIL credits this system has consumed, plus the vendor's
+    /// remaining balance when the vendor exposes a balance endpoint.</summary>
+    [HttpGet("portal-usage")]
+    [Authorize(Policy = "Admin")]
+    public async Task<ActionResult<PortalUsageInfo>> PortalUsage([FromQuery] DateTime? from = null, [FromQuery] DateTime? to = null)
+        => Ok(await _cibil.GetPortalUsageAsync(from, to));
+
+    /// <summary>Admin: probe the vendor balance endpoint on demand.</summary>
+    [HttpGet("vendor-balance")]
+    [Authorize(Policy = "Admin")]
+    public async Task<ActionResult<VendorBalanceInfo>> VendorBalance()
+        => Ok(await _cibil.GetVendorBalanceAsync());
+
+    /// <summary>The caller's own CIBIL pull events — backs the TL tab's "My Reports"
+    /// section. Scoped to the caller's own EMP_CODE with no hierarchy expansion, so a TL
+    /// never sees another employee's pulls.</summary>
+    [HttpGet("my-reports")]
+    public async Task<ActionResult<object>> MyReports([FromQuery] int take = 100)
+    {
+        var rows = await _cibil.ListMyPullsAsync(EmpCode, take);
+        return Ok(new { total = rows.Count, rows });
     }
 }
 

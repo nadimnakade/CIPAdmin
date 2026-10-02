@@ -441,7 +441,7 @@ export default function BsaAnalyzerPage() {
         <div className="bsa-head-left">
           <div className="bsa-head-icon"><Icon name="fileText" size={26} /></div>
           <div>
-            <h1>Bank Statement Analyzer</h1>
+            <h1>Cibil & Bank Statement Analyzer</h1>
             <p className="muted">Upload a bank statement (and optionally a CIBIL report) — rule-based analysis: salary, EMIs, loans, bounces, FOIR and underwriting grade.</p>
           </div>
         </div>
@@ -544,7 +544,7 @@ export default function BsaAnalyzerPage() {
             </div>
           </div>
           <div className="field">
-            <label>CIBIL PDF password (if protected)</label>
+            <label>PDF password (if protected)</label>
             <div className="bsa-pwd">
               <input type={showPwd ? 'text' : 'password'} placeholder="Password" value={cibilPassword}
                 onChange={(e) => setCibilPassword(e.target.value)} />

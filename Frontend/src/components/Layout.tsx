@@ -77,12 +77,17 @@ export default function Layout() {
   }, [userMenuOpen]);
 
   // Topbar quick search — matches page names and navigates on Enter.
+  // External links are excluded: navigate() would treat their URL as an in-app route.
   const searchIndex = useMemo(
     () =>
       nav.flatMap((g) =>
         g.to
-          ? [{ label: g.label, to: g.to }]
-          : (g.children || []).filter((c) => !!c.to).map((c) => ({ label: c.label, to: c.to! }))
+          ? g.external
+            ? []
+            : [{ label: g.label, to: g.to }]
+          : (g.children || [])
+              .filter((c) => !!c.to && !c.external)
+              .map((c) => ({ label: c.label, to: c.to! }))
       ),
     [nav]
   );
@@ -133,6 +138,21 @@ export default function Layout() {
         <nav className="side-nav">
           {nav.map((item) =>
             item.to ? (
+              item.external ? (
+                // Off-site link (e.g. the ClearTax calculator): a real anchor in a new
+                // tab, never a react-router NavLink — that would treat the URL as an
+                // in-app route and render a blank page.
+                <a
+                  key={item.label}
+                  className="nav-item"
+                  href={item.to}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={collapsed ? item.label : undefined}
+                >
+                  <Icon name={item.icon ?? 'fileText'} /> <span>{item.label}</span>
+                </a>
+              ) : (
               <NavLink
                 key={item.label}
                 to={item.to}
@@ -142,6 +162,7 @@ export default function Layout() {
               >
                 <Icon name={item.icon ?? 'fileText'} /> <span>{item.label}</span>
               </NavLink>
+              )
             ) : (
               <div key={item.label} className={'nav-group' + (openGroups.includes(item.label) ? ' expanded' : '')}>
                 <button
@@ -154,17 +175,31 @@ export default function Layout() {
                   <span className="nav-caret"><Icon name="chevronDown" size={10} /></span>
                 </button>
                 <div className="nav-submenu">
-                  {item.children!.filter((c) => !!c.to).map((c) => (
-                    <NavLink
-                      key={c.to}
-                      to={c.to!}
-                      className={({ isActive }) => 'nav-subitem' + (isActive ? ' active' : '')}
-                      title={collapsed ? c.label : undefined}
-                    >
-                      <span className="nav-dot" />
-                      <span>{c.label}</span>
-                    </NavLink>
-                  ))}
+                  {item.children!.filter((c) => !!c.to).map((c) =>
+                    c.external ? (
+                      <a
+                        key={c.to}
+                        className="nav-subitem"
+                        href={c.to!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={collapsed ? c.label : undefined}
+                      >
+                        <span className="nav-dot" />
+                        <span>{c.label}</span>
+                      </a>
+                    ) : (
+                      <NavLink
+                        key={c.to}
+                        to={c.to!}
+                        className={({ isActive }) => 'nav-subitem' + (isActive ? ' active' : '')}
+                        title={collapsed ? c.label : undefined}
+                      >
+                        <span className="nav-dot" />
+                        <span>{c.label}</span>
+                      </NavLink>
+                    )
+                  )}
                 </div>
               </div>
             )

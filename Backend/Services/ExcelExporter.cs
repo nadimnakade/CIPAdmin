@@ -56,7 +56,8 @@ public static class ExcelExporter
         sheetXml.Append("<cols>");
         for (int c = 1; c <= cols.Count; c++)
             sheetXml.Append($"<col min=\"{c}\" max=\"{c}\" width=\"22\" customWidth=\"1\"/>");
-        sheetXml.Append("</cols><sheetData>");
+        sheetXml.Append("</cols>");
+        sheetXml.Append("<sheetData>");
 
         // Header row
         sheetXml.Append($"<row r=\"1\">");
@@ -87,7 +88,14 @@ public static class ExcelExporter
                 }
                 else if (raw is DateTime dt)
                 {
+                    // Real date serial, not text — this is what lets Excel's own
+                    // Data > Sort order rows chronologically.
                     sheetXml.Append($"<c r=\"{CellRef(rowIndex, c)}\" s=\"2\"><v>{dt.ToOADate():0.###############}</v></c>");
+                }
+                else if (raw is TimeSpan ts)
+                {
+                    // Time of day as a fraction-of-a-day serial, styled as a time.
+                    sheetXml.Append($"<c r=\"{CellRef(rowIndex, c)}\" s=\"3\"><v>{ts.TotalDays:0.###############}</v></c>");
                 }
                 else
                 {
@@ -98,7 +106,14 @@ public static class ExcelExporter
             rowIndex++;
         }
 
-        sheetXml.Append("</sheetData></worksheet>");
+        sheetXml.Append("</sheetData>");
+        // autoFilter must come AFTER sheetData per the CT_Worksheet sequence
+        // (sheetPr, dimension, sheetViews, sheetFormatPr, cols, sheetData, ...,
+        // autoFilter, ...). Emitting it before sheetData makes Excel refuse the
+        // file with "we found a problem with some content" and repair/drop it.
+        if (cols.Count > 0)
+            sheetXml.Append($"<autoFilter ref=\"A1:{CellRef(1, cols.Count)}\"/>");
+        sheetXml.Append("</worksheet>");
 
         string nsR = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         var workbookXml =
@@ -128,7 +143,9 @@ public static class ExcelExporter
             "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
             "<fonts count=\"2\">" +
             "<font><sz val=\"11\"/><name val=\"Calibri\"/></font>" +
-            "<font><b/><color rgb=\"FFFFFFFF\"/><sz val=\"11\"/><name val=\"Calibri\"/></font>" +
+            // CT_Font is an ordered sequence: b, i, ..., sz, color, name, ...
+            // color-before-sz is a schema violation that makes Excel repair the file.
+            "<font><b/><sz val=\"11\"/><color rgb=\"FFFFFFFF\"/><name val=\"Calibri\"/></font>" +
             "</fonts>" +
             "<fills count=\"3\">" +
             "<fill><patternFill patternType=\"none\"/></fill>" +
@@ -137,10 +154,13 @@ public static class ExcelExporter
             "</fills>" +
             "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" +
             "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
-            "<cellXfs count=\"3\">" +
+            "<cellXfs count=\"4\">" +
             "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" +                                     // 0 default
             "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\"/>" +      // 1 header
             "<xf numFmtId=\"14\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>" +             // 2 date (m/d/yyyy)
+            // 3 time (h:mm:ss) — a TimeSpan lands here as a fraction of a day, so it needs a
+            // time number format or Excel renders it as a 1900-01-00 date instead.
+            "<xf numFmtId=\"21\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>" +
             "</cellXfs>" +
             "</styleSheet>";
 

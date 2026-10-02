@@ -11,8 +11,13 @@ namespace CIPAdmin.Backend.Controllers;
 public class SettingsController : ControllerBase
 {
     private readonly IDbContext _db;
+    private readonly ICibilService _cibil;
 
-    public SettingsController(IDbContext db) => _db = db;
+    public SettingsController(IDbContext db, ICibilService cibil)
+    {
+        _db = db;
+        _cibil = cibil;
+    }
 
     private int EmpCode => int.Parse(User.FindFirst("empCode")!.Value);
     private int RoleId => int.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value, out var r) ? r : 0;
@@ -35,7 +40,8 @@ public class SettingsController : ControllerBase
     }
 
     /// <summary>Update the default monthly CIBIL pull limit (admins only).
-    /// Takes effect within 60s (quota lookups cache the old value briefly).</summary>
+    /// The cached value is evicted on save, so the new limit applies to the very next
+    /// quota read rather than up to 60 seconds later.</summary>
     [HttpPut("monthly-pull-limit")]
     [Authorize(Policy = "Admin")]
     public async Task<IActionResult> SetMonthlyPullLimit([FromBody] PullLimitInput input)
@@ -70,6 +76,9 @@ public class SettingsController : ControllerBase
                 detail = ex.Message,
             });
         }
+
+        // Evict the cached default so employees see the new number immediately.
+        _cibil.InvalidatePullLimitCache();
         return Ok(new { saved = input.MonthlyPullLimit });
     }
 

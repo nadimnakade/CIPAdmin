@@ -90,3 +90,4 @@ D:\Git_Repos\PDF\CIPAdmin\Backend\obj\Release\net8.0\CIPAdmin.Backend.pdb
 D:\Git_Repos\PDF\CIPAdmin\Backend\obj\Release\net8.0\CIPAdmin.Backend.genruntimeconfig.cache
 D:\Git_Repos\PDF\CIPAdmin\Backend\obj\Release\net8.0\ref\CIPAdmin.Backend.dll
 D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Release\net8.0\appsettings.Production.json
+D:\Git_Repos\PDF\CIPAdmin\Backend\obj\Release\net8.0\CIPAdmin.Backend.sourcelink.json

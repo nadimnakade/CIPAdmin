@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CIPAdmin.Backend")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0138eb80a3c642c82224d80674a4c4bfef1381e6")]
 [assembly: System.Reflection.AssemblyProductAttribute("CIPAdmin.Backend")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CIPAdmin.Backend")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -15,8 +15,17 @@ public interface ICibilService
     Task<List<object>> QueryEmployeeLimitsAsync(string? search, string filter);
     Task<object> SetEmployeeLimitAsync(int empCode, int monthlyLimit, int setBy);
     Task ClearEmployeeLimitAsync(int empCode);
+    /// <summary>Evict the cached default pull limit so an admin's change applies on the
+    /// next quota read instead of up to 60 seconds later.</summary>
+    void InvalidatePullLimitCache();
     Task<object> ImportLegacyFilesAsync();
     Task<List<CibilReportInfo>> ListAsync(string? reportType = null, DateTime? from = null, DateTime? to = null, string? search = null, int[]? scopedCodes = null);
+    /// <summary>The caller's own pull events for the TL tab's "My Reports" list.</summary>
+    Task<List<MyPullRow>> ListMyPullsAsync(int empCode, int take = 100);
+    /// <summary>Admin: portal-wide CIBIL consumption plus the vendor credit balance.</summary>
+    Task<PortalUsageInfo> GetPortalUsageAsync(DateTime? from = null, DateTime? to = null);
+    /// <summary>Probe the vendor's balance endpoint. Never throws — reports availability instead.</summary>
+    Task<VendorBalanceInfo> GetVendorBalanceAsync();
     Task<(byte[] bytes, CibilReportInfo report)?> GetFileAsync(int reportId);
     Task<int?> GetPulledByAsync(int reportId);
     string StorageFolderPath();
@@ -105,6 +114,11 @@ public class CibilService : ICibilService
         return int.TryParse(_config["Cibil:MonthlyPullLimit"], out var cfg) && cfg > 0 ? cfg : 50;
     }
 
+    /// <summary>Drop the cached default pull limit so an admin's change is visible on the
+    /// very next quota read instead of up to 60 seconds later. Called after the setting
+    /// or a per-employee override is written.</summary>
+    public void InvalidatePullLimitCache() => _memoryCache.Remove("cibil-pull-limit");
+
     private static string CurrentMonthKey() => DateTime.Now.ToString("yyyy-MM");
 
     // ------------------------------------------------------------------ cache
@@ -170,8 +184,18 @@ public class CibilService : ICibilService
         FileSize = r["FILE_SIZE"] == DBNull.Value ? null : Convert.ToInt64(r["FILE_SIZE"]),
         PulledByName = r["PULLED_BY_NAME"].ToString(),
         PulledDate = Convert.ToDateTime(r["PULLED_DATE"]),
-        Source = r["SOURCE"].ToString()!
+        Source = r["SOURCE"].ToString()!,
+        // These two columns are absent from the narrower selects (FindByPan /
+        // GetFileAsync), so read them defensively.
+        LocationName = r.Table.Columns.Contains("LOCATION_NAME") ? NullIfBlank(r["LOCATION_NAME"]) : null,
+        CenterManager = r.Table.Columns.Contains("CENTER_MANAGER") ? NullIfBlank(r["CENTER_MANAGER"]) : null
     };
+
+    private static string? NullIfBlank(object? v)
+    {
+        var s = v?.ToString();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
 
     private async Task<string?> GetFilePathAsync(int reportId)
     {
@@ -223,8 +247,9 @@ public class CibilService : ICibilService
             roleId = r["ROLE_ID"] == DBNull.Value ? 0 : r.Field<int>("ROLE_ID"),
             roleName = r["ROLE_NAME"].ToString(),
             monthlyLimit = r["MONTHLY_LIMIT"] == DBNull.Value ? null : (int?)r.Field<int>("MONTHLY_LIMIT"),
-            // Backend-driven: what this employee actually gets (override or current default).
-            effectiveLimit = r["MONTHLY_LIMIT"] == DBNull.Value ? defaultLimit : Math.Max(defaultLimit, r.Field<int>("MONTHLY_LIMIT")),
+            // Backend-driven: what this employee actually gets. An override replaces the
+            // default outright (see GetQuotaAsync) so lowering a cap takes effect too.
+            effectiveLimit = r["MONTHLY_LIMIT"] == DBNull.Value ? defaultLimit : r.Field<int>("MONTHLY_LIMIT"),
             setOn = r["SET_ON"] == DBNull.Value ? null : (DateTime?)Convert.ToDateTime(r["SET_ON"])
         }).ToList();
     }
@@ -244,6 +269,7 @@ public class CibilService : ICibilService
             WHEN NOT MATCHED THEN INSERT (EMP_CODE, MONTHLY_LIMIT, SET_BY) VALUES (@e, @l, @by);",
             p => { p.AddWithValue("@e", empCode); p.AddWithValue("@l", monthlyLimit); p.AddWithValue("@by", setBy); });
 
+        InvalidatePullLimitCache();
         return new { empCode, monthlyLimit, saved = true };
     }
 
@@ -252,6 +278,7 @@ public class CibilService : ICibilService
         await _db.ExecuteAsync(
             "DELETE FROM dbo.TBL_CIP_EMPLOYEE_CIBIL_LIMIT WHERE EMP_CODE = @e",
             p => p.AddWithValue("@e", empCode));
+        InvalidatePullLimitCache();
     }
 
     /// <summary>One-time legacy import: scan the storage folder tree for PDFs whose
@@ -318,8 +345,13 @@ public class CibilService : ICibilService
         var baseLimit = await BaseMonthlyLimitAsync();
         var month = CurrentMonthKey();
 
+        // Count PULL EVENTS, not report rows. TBL_CIP_CIBIL_REPORTS is one row per
+        // PAN per month, so counting it made cached pulls invisible and attributed
+        // usage to whoever first pulled a PAN — which is the "0 / 10" bug. The ledger
+        // has one row per request, cached and legacy serves included. STATUS='OK'
+        // keeps failed vendor calls from consuming the user's allowance.
         var usedV = await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_BY = @e AND PULL_MONTH = @m",
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_PULL_LOG WHERE EMP_CODE = @e AND PULL_MONTH = @m AND STATUS = 'OK'",
             p => { p.AddWithValue("@e", empCode); p.AddWithValue("@m", month); });
         var used = Convert.ToInt32(usedV ?? 0);
 
@@ -335,7 +367,11 @@ public class CibilService : ICibilService
             "SELECT MONTHLY_LIMIT FROM dbo.TBL_CIP_EMPLOYEE_CIBIL_LIMIT WHERE EMP_CODE = @e",
             p => p.AddWithValue("@e", empCode));
         var empLimit = empLimitV == null || empLimitV == DBNull.Value ? 0 : Convert.ToInt32(empLimitV);
-        var floorLimit = empLimit > 0 ? Math.Max(baseLimit, empLimit) : baseLimit;
+        // An explicit per-employee override REPLACES the default, in both directions.
+        // It used to be Math.Max(baseLimit, empLimit), which meant an admin could only
+        // ever raise someone's cap — setting it BELOW the default silently did nothing
+        // and the employee kept the default limit.
+        var floorLimit = empLimit > 0 ? empLimit : baseLimit;
 
         var effective = Math.Max(floorLimit, approved);
         var pendingV = await _db.ScalarAsync(@"
@@ -349,6 +385,10 @@ public class CibilService : ICibilService
             Limit = empLimit > 0 ? empLimit : baseLimit,
             EffectiveLimit = effective,
             ApprovedLimit = approved > floorLimit ? approved.ToString() : null,
+            // The service doesn't know the caller's role, so this is the raw
+            // "out of allowance" signal. The controller clears it for admins,
+            // who are never quota-blocked.
+            Blocked = used >= effective,
         };
     }
 
@@ -517,6 +557,86 @@ public class CibilService : ICibilService
 
     // -------------------------------------------------------------- generate
 
+    /// <summary>Work location of an employee, snapshotted onto the report row at pull
+    /// time. Cached briefly because every pull and every quota check resolves it.</summary>
+    private async Task<(int? id, string? name)> EmployeeLocationAsync(int empCode)
+    {
+        var dt = await _db.QueryAsync(@"
+            SELECT e.LOCATION_ID, l.LOC_NAME
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
+            WHERE e.EMP_CODE = @e",
+            p => p.AddWithValue("@e", empCode));
+
+        if (dt.Rows.Count == 0) return (null, null);
+        var id = dt.Rows[0]["LOCATION_ID"] == DBNull.Value
+            ? (int?)null : Convert.ToInt32(dt.Rows[0]["LOCATION_ID"]);
+        var name = dt.Rows[0]["LOC_NAME"].ToString();
+        return (id, string.IsNullOrWhiteSpace(name) ? null : name);
+    }
+
+    /// <summary>
+    /// Records ONE pull event in TBL_CIP_CIBIL_PULL_LOG. This is the counting source of
+    /// truth for every CIBIL usage figure on both tabs.
+    ///
+    /// Called on every GenerateAsync return path — fresh, cached, legacy and regenerated
+    /// pulls all count, because the requirement is that a TL's monthly allowance is
+    /// consumed whether or not the vendor was called. The alternative (the old
+    /// behaviour, counting report rows) is what produced the "0 / 10" bug: a cached pull
+    /// never inserted a report row, so it was invisible, and a TL whose PANs had all
+    /// been pulled by colleagues legitimately showed 0.
+    ///
+    /// Best-effort by design: a failure here must never break a successful pull, so
+    /// exceptions are logged and swallowed. The consequence is an undercount, which is
+    /// far safer than failing a user's report.
+    /// </summary>
+    private async Task RecordPullAsync(int? reportId, string pan, string reportType,
+        int empCode, string empName, string source, string status = "OK")
+    {
+        try
+        {
+            var (locId, locName) = await EmployeeLocationAsync(empCode);
+            await _db.ExecuteAsync(@"
+                INSERT INTO dbo.TBL_CIP_CIBIL_PULL_LOG
+                    (REPORT_ID, PAN_NO, REPORT_TYPE, EMP_CODE, EMP_NAME,
+                     LOCATION_ID, LOCATION_NAME, PULLED_BY_NAME, SOURCE, STATUS, PULLED_DATE)
+                VALUES
+                    (@reportId, @pan, @type, @emp, @empname,
+                     @locId, @locName, @empname, @source, @status, GETDATE())",
+                p =>
+                {
+                    p.AddWithValue("@reportId", (object?)reportId ?? DBNull.Value);
+                    p.AddWithValue("@pan", pan);
+                    p.AddWithValue("@type", reportType);
+                    p.AddWithValue("@emp", empCode);
+                    p.AddWithValue("@empname", (object?)empName ?? DBNull.Value);
+                    p.AddWithValue("@locId", (object?)locId ?? DBNull.Value);
+                    p.AddWithValue("@locName", (object?)locName ?? DBNull.Value);
+                    p.AddWithValue("@source", source);
+                    p.AddWithValue("@status", status);
+                });
+
+            // Keep the report row's snapshot columns in step with the ledger.
+            if (reportId.HasValue)
+                await _db.ExecuteAsync(@"
+                    UPDATE dbo.TBL_CIP_CIBIL_REPORTS
+                    SET LOCATION_ID = @locId, LOCATION_NAME = @locName,
+                        CENTER_MANAGER = ISNULL(CENTER_MANAGER, @empname)
+                    WHERE REPORT_ID = @id",
+                    p =>
+                    {
+                        p.AddWithValue("@locId", (object?)locId ?? DBNull.Value);
+                        p.AddWithValue("@locName", (object?)locName ?? DBNull.Value);
+                        p.AddWithValue("@empname", (object?)empName ?? DBNull.Value);
+                        p.AddWithValue("@id", reportId.Value);
+                    });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to record CIBIL pull event for PAN {Pan} (emp {Emp})", pan, empCode);
+        }
+    }
+
     public async Task<CibilGenerateResponse> GenerateAsync(CibilRequest request, int pulledBy, string pulledByName, bool isAdmin, bool regenerate, CancellationToken ct = default)
     {
         // Strip spaces/dashes so "AAABP0002A " or "AAAB-P0-002A" still validates as 10 chars.
@@ -533,6 +653,8 @@ public class CibilService : ICibilService
         if (legacyReport != null && !(isAdmin && regenerate))
         {
             _logger.LogInformation("CIBIL for PAN {Pan} is a legacy report ({Date}) — serving saved PDF (no API call).", pan, legacyReport.PulledDate);
+            // A legacy serve is a pull event: it counts against the monthly limit.
+            await RecordPullAsync(legacyReport.ReportId, pan, reportType, pulledBy, pulledByName, "LEGACY");
             return new CibilGenerateResponse
             {
                 Source = "LEGACY",
@@ -552,6 +674,10 @@ public class CibilService : ICibilService
         if (existingReport != null && !(isAdmin && regenerate))
         {
             _logger.LogInformation("CIBIL for PAN {Pan} already pulled {Date} this month — serving saved PDF (no API call).", pan, existingReport.PulledDate);
+            // Served from cache, but still a pull: count it as 1 against the limit.
+            // Logged BEFORE the quota snapshot below so the response reports the
+            // post-pull count rather than the pre-pull one.
+            await RecordPullAsync(existingReport.ReportId, pan, reportType, pulledBy, pulledByName, "CACHE");
             return new CibilGenerateResponse
             {
                 Source = "CACHE",
@@ -609,6 +735,7 @@ public class CibilService : ICibilService
             TryDeleteFile(oldPath);
 
             _logger.LogInformation("Admin regeneration for PAN {Pan} saved as {File} (row {Id} replaced).", pan, regenFileName, existingReport.ReportId);
+            await RecordPullAsync(existingReport.ReportId, pan, reportType, pulledBy, pulledByName, "REGEN");
             return new CibilGenerateResponse
             {
                 Source = "REGEN",
@@ -627,12 +754,25 @@ public class CibilService : ICibilService
                 },
                 DownloadUrl = $"/api/cibil/download/{existingReport.ReportId}",
                 Message = "Report regenerated by administrator — the previous file for this month was replaced.",
-                Quota = quota
+                // Re-read: the pull event recorded above is not in the earlier snapshot.
+                Quota = await GetQuotaAsync(pulledBy, pulledByName)
             };
         }
 
         // ---------- Fresh pull (new PAN this month).
-        var bytes = await PullFromApiAsync(request, ResolveApiToken(request), ct);
+        byte[] bytes;
+        try
+        {
+            bytes = await PullFromApiAsync(request, ResolveApiToken(request), ct);
+        }
+        catch
+        {
+            // Log the attempt as FAILED so the audit trail shows a pull was tried.
+            // STATUS='FAILED' is excluded from quota counts, so a vendor error never
+            // burns a user's monthly allowance.
+            await RecordPullAsync(existingReport?.ReportId, pan, reportType, pulledBy, pulledByName, "API", "FAILED");
+            throw;
+        }
 
         var fileName = BuildFileName(request.Name, pan);
         var folder = UserStorageFolderPath(pulledByName);
@@ -640,6 +780,10 @@ public class CibilService : ICibilService
         await System.IO.File.WriteAllBytesAsync(filePath, bytes, ct);
 
         var (reportId, source) = await InsertReportAsync(request, pan, reportType, fileName, filePath, bytes.Length, pulledBy, pulledByName);
+
+        // source is CACHE when a concurrent request won the race for this PAN+month;
+        // that is still a pull event and still counts as 1.
+        await RecordPullAsync(reportId, pan, reportType, pulledBy, pulledByName, source);
 
         _logger.LogInformation("CIBIL report for PAN {Pan} pulled from API and saved as {File}.", pan, fileName);
 
@@ -845,19 +989,27 @@ public class CibilService : ICibilService
 
     public async Task<List<CibilReportInfo>> ListAsync(string? reportType = null, DateTime? from = null, DateTime? to = null, string? search = null, int[]? scopedCodes = null)
     {
+        // LOCATION_* are snapshotted at pull time; the join is a fallback for rows
+        // created before the columns existed. CENTER_MANAGER falls back to the
+        // puller's name. Legacy rows have PULLED_BY = NULL and render as an em-dash.
         var sql = @"
-            SELECT REPORT_ID, PAN_NO, APPLICANT_NAME, MOBILE, REPORT_TYPE,
-                   FILE_NAME, FILE_SIZE, PULLED_BY_NAME, PULLED_DATE, SOURCE
-            FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE 1 = 1";
+            SELECT r.REPORT_ID, r.PAN_NO, r.APPLICANT_NAME, r.MOBILE, r.REPORT_TYPE,
+                   r.FILE_NAME, r.FILE_SIZE, r.PULLED_BY_NAME, r.PULLED_DATE, r.SOURCE,
+                   COALESCE(r.LOCATION_NAME, l.LOC_NAME) AS LOCATION_NAME,
+                   COALESCE(r.CENTER_MANAGER, r.PULLED_BY_NAME, 'legacy-import') AS CENTER_MANAGER
+            FROM dbo.TBL_CIP_CIBIL_REPORTS r
+            LEFT JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = r.PULLED_BY
+            LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = COALESCE(r.LOCATION_ID, e.LOCATION_ID)
+            WHERE 1 = 1";
         // Hierarchy scope: only reports pulled by the viewer or their downline.
         // All filter fragments must be appended BEFORE the query call.
         if (scopedCodes is { Length: > 0 })
-            sql += $" AND PULLED_BY IN ({HierarchyService.InlineCodes(scopedCodes)})";
-        if (!string.IsNullOrWhiteSpace(reportType)) sql += " AND REPORT_TYPE = @type";
-        if (from.HasValue) sql += " AND PULLED_DATE >= @from";
-        if (to.HasValue) sql += " AND PULLED_DATE < @to";
-        if (!string.IsNullOrWhiteSpace(search)) sql += " AND (APPLICANT_NAME LIKE @q OR PAN_NO LIKE @q OR FILE_NAME LIKE @q)";
-        sql += " ORDER BY PULLED_DATE DESC";
+            sql += $" AND r.PULLED_BY IN ({HierarchyService.InlineCodes(scopedCodes)})";
+        if (!string.IsNullOrWhiteSpace(reportType)) sql += " AND r.REPORT_TYPE = @type";
+        if (from.HasValue) sql += " AND r.PULLED_DATE >= @from";
+        if (to.HasValue) sql += " AND r.PULLED_DATE < @to";
+        if (!string.IsNullOrWhiteSpace(search)) sql += " AND (r.APPLICANT_NAME LIKE @q OR r.PAN_NO LIKE @q OR COALESCE(r.MOBILE,'') LIKE @q OR r.FILE_NAME LIKE @q OR COALESCE(r.LOCATION_NAME,'') LIKE @q OR COALESCE(r.CENTER_MANAGER, r.PULLED_BY_NAME,'') LIKE @q)";
+        sql += " ORDER BY r.PULLED_DATE DESC";
         var bind = new Action<SqlParameterCollection>(p =>
         {
             if (!string.IsNullOrWhiteSpace(reportType)) p.AddWithValue("@type", reportType);
@@ -893,5 +1045,162 @@ public class CibilService : ICibilService
             "SELECT PULLED_BY FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE REPORT_ID = @id",
             p => p.AddWithValue("@id", reportId));
         return v == null || v == DBNull.Value ? null : Convert.ToInt32(v);
+    }
+
+    // ------------------------------------------------------------ pull ledger
+
+    /// <summary>The caller's own pull events (TL tab "My Reports"). Scoped to EMP_CODE
+    /// with no hierarchy expansion, so a TL only ever sees their own pulls.</summary>
+    public async Task<List<MyPullRow>> ListMyPullsAsync(int empCode, int take = 100)
+    {
+        take = Math.Clamp(take, 1, 500);
+        var dt = await _db.QueryAsync($@"
+            SELECT TOP {take} lg.LOG_ID, lg.REPORT_ID, lg.PAN_NO, lg.SOURCE,
+                   lg.PULLED_DATE, lg.LOCATION_NAME, lg.PULLED_BY_NAME,
+                   rep.APPLICANT_NAME, rep.REPORT_TYPE, rep.FILE_NAME
+            FROM dbo.TBL_CIP_CIBIL_PULL_LOG lg
+            LEFT JOIN dbo.TBL_CIP_CIBIL_REPORTS rep ON rep.REPORT_ID = lg.REPORT_ID
+            WHERE lg.EMP_CODE = @e AND lg.STATUS = 'OK'
+            ORDER BY lg.PULLED_DATE DESC, lg.LOG_ID DESC",
+            p => p.AddWithValue("@e", empCode));
+
+        return dt.AsEnumerable().Select(r => new MyPullRow
+        {
+            LogId = Convert.ToInt32(r["LOG_ID"]),
+            ReportId = r["REPORT_ID"] == DBNull.Value ? (int?)null : Convert.ToInt32(r["REPORT_ID"]),
+            PanNo = r["PAN_NO"].ToString() ?? "",
+            ApplicantName = NullIfBlank(r["APPLICANT_NAME"]),
+            ReportType = r["REPORT_TYPE"] == DBNull.Value ? "cibil" : r["REPORT_TYPE"].ToString()!,
+            Source = r["SOURCE"].ToString() ?? "",
+            LocationName = NullIfBlank(r["LOCATION_NAME"]),
+            CenterManager = NullIfBlank(r["PULLED_BY_NAME"]),
+            FileName = NullIfBlank(r["FILE_NAME"]),
+            PullDate = Convert.ToDateTime(r["PULLED_DATE"]).ToString("yyyy-MM-dd"),
+            PullTime = Convert.ToDateTime(r["PULLED_DATE"]).ToString("HH:mm:ss"),
+        }).ToList();
+    }
+
+    /// <summary>Admin: how many CIBIL credits this system has consumed, plus the vendor
+    /// balance when the vendor exposes a balance endpoint.
+    ///
+    /// PortalPulls counts only events that actually called the vendor (API + REGEN).
+    /// That is this system's consumption and is NOT the vendor's remaining balance —
+    /// the two are different numbers and must not be presented as the same figure.</summary>
+    public async Task<PortalUsageInfo> GetPortalUsageAsync(DateTime? from = null, DateTime? to = null)
+    {
+        var fromDate = from?.Date ?? new DateTime(1900, 1, 1);
+        var toDate = to?.Date.AddDays(1) ?? DateTime.Now.Date.AddDays(1);
+        var month = CurrentMonthKey();
+
+        async Task<int> Count(string extra)
+        {
+            // @m is only bound when the fragment uses it; extra parameters are harmless.
+            var v = await _db.ScalarAsync($@"
+                SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_PULL_LOG
+                WHERE STATUS = 'OK' AND PULLED_DATE >= @from AND PULLED_DATE < @to {extra}",
+                p =>
+                {
+                    p.AddWithValue("@from", fromDate);
+                    p.AddWithValue("@to", toDate);
+                    if (extra.Contains("@m")) p.AddWithValue("@m", month);
+                });
+            return Convert.ToInt32(v ?? 0);
+        }
+
+        return new PortalUsageInfo
+        {
+            // A vendor call happened for these; this is the CIBIL credit burn.
+            PortalPulls = await Count("AND SOURCE IN ('API','REGEN')"),
+            MonthPulls = await Count("AND PULL_MONTH = @m"),
+            MonthCaches = await Count("AND PULL_MONTH = @m AND SOURCE IN ('CACHE','LEGACY')"),
+            TotalPullEvents = await Count(""),
+            From = fromDate.ToString("yyyy-MM-dd"),
+            To = toDate.AddDays(-1).ToString("yyyy-MM-dd"),
+            Vendor = await GetVendorBalanceAsync()
+        };
+    }
+
+    /// <summary>Probe the vendor balance endpoint. Never throws: any problem comes back
+    /// as Available=false with a readable Message, so the Reports page still renders.
+    /// Not cached — a stale balance is worse than a slow one.</summary>
+    public async Task<VendorBalanceInfo> GetVendorBalanceAsync()
+    {
+        var result = new VendorBalanceInfo { CheckedOn = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") };
+        var url = _config["Cibil:BalanceUrl"];
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            result.Message = "Cibil:BalanceUrl is not configured. The vendor has not published a balance endpoint, so the exact credit balance is unavailable.";
+            return result;
+        }
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            var token = _config["Cibil:ApiToken"];
+            if (!string.IsNullOrWhiteSpace(token))
+                req.Headers.TryAddWithoutValidation("x-api-token", token);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var res = await _http.SendAsync(req, cts.Token);
+            var body = await res.Content.ReadAsStringAsync(cts.Token);
+
+            if (!res.IsSuccessStatusCode)
+            {
+                result.Message = $"Vendor balance endpoint returned HTTP {(int)res.StatusCode}.";
+                return result;
+            }
+
+            using var doc = JsonDocument.Parse(body);
+            if (TryReadDecimal(doc.RootElement, out var balance))
+            {
+                result.Available = true;
+                result.Balance = balance;
+                return result;
+            }
+
+            result.Message = "Vendor balance response did not contain a recognisable numeric balance.";
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "CIBIL vendor balance probe failed");
+            result.Message = "Vendor balance unavailable: " + ex.Message;
+            return result;
+        }
+    }
+
+    /// <summary>Pull the first plausible number out of a balance payload, whether it sits
+    /// at the root or one level down under a conventional key.</summary>
+    private static bool TryReadDecimal(JsonElement el, out decimal value)
+    {
+        value = 0;
+        string[] keys = { "balance", "wallet_balance", "credit_balance", "remaining",
+                          "available_balance", "credits", "amount" };
+
+        if (el.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var k in keys)
+            {
+                if (el.TryGetProperty(k, out var v) && TryScalarDecimal(v, out value)) return true;
+            }
+            // One level down: { "data": { "balance": 12 } } etc.
+            foreach (var p in el.EnumerateObject())
+            {
+                if (p.Value.ValueKind == JsonValueKind.Object && TryReadDecimal(p.Value, out value)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool TryScalarDecimal(JsonElement v, out decimal value)
+    {
+        value = 0;
+        return v.ValueKind switch
+        {
+            JsonValueKind.Number => v.TryGetDecimal(out value),
+            JsonValueKind.String => decimal.TryParse(v.GetString(), out value),
+            _ => false
+        };
     }
 }

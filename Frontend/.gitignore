@@ -1,0 +1,6 @@
+Backend/publish/
+Backend/bin
+Frontend/node_modules/
+*.dll
+*.exe
+Frontend/dist

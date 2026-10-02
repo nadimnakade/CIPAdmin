@@ -96,3 +96,5 @@ D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Debug\net8.0\publish\CIPAdmin.Backend.deps
 D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Debug\net8.0\publish\CIPAdmin.Backend.runtimeconfig.json
 D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Debug\net8.0\publish\CIPAdmin.Backend.staticwebassets.endpoints.json
 D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Debug\net8.0\publish\appsettings.Production.json
+D:\Git_Repos\PDF\CIPAdmin\Backend\bin\Debug\net8.0\publish\wwwroot\web.config
+D:\Git_Repos\PDF\CIPAdmin\Backend\obj\Debug\net8.0\CIPAdmin.Backend.sourcelink.json

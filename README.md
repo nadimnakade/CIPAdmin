@@ -14,7 +14,7 @@ Full-stack admin portal: **React 18 + TypeScript (Vite)** frontend, **ASP.NET Co
 | **Company Category** | Port of CIPPortal's CompanyCategory module on `TBL_CIP_COMPANY_CATEGORY` (1.7M+ rows, served 1 row per company via MAX(COMPANY_KEY)). Bulk **.xlsx upload** with Product + Bank (legacy "Company Name"/"Final Category" format, deduped per product+bank), paged/filterable/sortable grid, inline edit, delete. |
 | **OCR to Excel** | `TBL_CIP_OCR_JOBS` + `Backend/ocr uploads/` (image + extracted-grid JSON per job). Upload a photo/screenshot of a spreadsheet (JPG/PNG/BMP/GIF/WEBP/TIFF ≤ 10 MB); Tesseract OCR rebuilds the grid (rows from line clustering, columns from word-gap edges), shown in an editable preview next to the original image. Edits save back to history, any past conversion can be re-opened, and the grid exports to a real `.xlsx` (numeric columns stay numeric via `ExcelExporter.BuildFromArrays`). History: own conversions, or everyone's for admins. | | **Lead Master** | Lead tracking on `TBL_CIP_LEAD_MASTER` (new table): search, status + active filters, server-side sorting and paging, add/edit modal (name, mobile, email, location, source, remarks, assignee, status), activate/deactivate, soft delete. Lists and assignment are scoped to the viewer's reporting subtree (admins see everything; leads they created stay visible even when unassigned). |
   | **BSA Analyzer** | Full C# port of the Bank Statement Analyzer (`Backend/Bsa/`): upload a statement (PDF/CSV/XLSX/TXT, ≤ 25 MB) and optionally a CIBIL report (PDF/TXT, with password); the rule engine categorizes salary, PF, loan EMIs, disbursements, credit-card payments, app loans, bounces, rent, SIPs, insurance, utilities, stock-market flows and APY, builds monthly summaries/insights/risk flags, parses the CIBIL text (score, personal, enquiries, accounts, DPD, adverse flags), cross-verifies lenders vs the statement, and produces FOIR-based eligibility + underwriting grade. Tabbed preview with per-section tables, stat cards and one-click **.xlsx export**. Stateless — no DB persistence per request. |
-| **Reports** | All pulled CIBIL/bureau reports; view/download the stored PDF (JWT-authorized stream). |
+| **Reports** | All pulled CIBIL/bureau reports; view/download the stored PDF (JWT-authorized stream). Grid columns include **Location** and **Center Manager** (the employee who pulled the report) plus **CIBIL Pull Date** and **CIBIL Pull Time** as separate sortable columns. **Export to Excel** writes the full filtered set with the date and time as real date/time cells, so Excel's own Data > Sort orders rows chronologically. Admin-only tiles show CIBIL portal pull count and, when the vendor publishes a balance endpoint (`Cibil:BalanceUrl`), the remaining credit balance. |
 | **Generic Reports** | Port of CIPPortal's GenericReport module: report-type list from `USP_CIP_FILL_DROPDOWN`, runs `USP_GENERIC_REPORT` (all 10 MIS report SPs) for any month/year, paginated dynamic grid, and **real .xlsx export** (OpenXML writer, no Interop). |
 | **Dialer Live** | Port of the DialerCount module: KPI tiles (total calls, active callers, connected, disbursed), calls-by-location bar chart, disposition donut, and a sortable/filterable per-caller table with totals row. Calls the legacy hierarchy-aware SP `USP_DIALER_LIVE_COUNT_REPORT @UserKey` (same as the portal's `CallLogLive`) — the SP itself restricts rows to the caller's reporting subtree, so every user sees only their team; the hourly chart runs for admins only. 60s auto-refresh with live pulse indicator. |
 | **Menu Master** (admin) | Role → sidebar-menu visibility matrix over `TBL_CIP_MENU_MASTER` / `TBL_CIP_ROLE_MENU` (roles from `TBL_CIP_ROLE_MASTER`). The sidebar renders from `GET /api/menus` (role-filtered, static fallback if the API is down); saving replaces a role's grants atomically. Seeded so every active role sees everything except the Administration group (roles 1/2 only). |
@@ -34,6 +34,30 @@ Admins (ROLE_ID 1/2) see all data. Every other role sees only their **reporting 
 | `GET /api/employees/master` | only subtree employees |
 | `GET /api/employees/dids` (+ `stats`, `export`, `without-did`) | only subtree assignments (generic DID rows visible to all) |
 | `GET /api/cibil/reports` | only reports pulled by self + downline |
+
+## CIBIL pull counting
+
+Monthly pull usage is counted from **`TBL_CIP_CIBIL_PULL_LOG`** (the pull ledger), not from
+`TBL_CIP_CIBIL_REPORTS`. The report table holds one row per *report artefact* — one PAN per
+month — so counting it made cached pulls invisible and credited usage to whoever first pulled
+a PAN. That is what produced the "0 / 10" quota bug: a TL whose PANs had all been pulled by
+colleagues showed 0.
+
+One ledger row is written per **pull event**, and every event counts:
+
+| Event | Counts toward the monthly limit | Consumes a vendor credit |
+|---|---|---|
+| Fresh pull (`API`) | yes | yes |
+| Admin regenerate (`REGEN`) | yes | yes |
+| Served from this month's cache (`CACHE`) | yes | no |
+| Served from a legacy PDF (`LEGACY`) | yes | no |
+| Vendor call failed (`STATUS='FAILED'`) | **no** | attempt only |
+| Re-downloading from the Reports grid | no | no |
+
+`STATUS='FAILED'` is excluded from quota counts, so a vendor error never burns a user's
+allowance. A pull blocked by the limit (HTTP 403) writes no row, so retrying cannot inflate
+the count. See `Backend/sql/CIBIL-PULL-LOG.sql` (idempotent, run once per database) and
+`docs/CIBIL-REPORTS-SPEC.md` for the full specification.
 | `GET /api/cibil/file/{id}` | 403 when the puller is outside the subtree |
 | `GET /api/dialer/live` | scoped inside the legacy SP via `@UserKey` |
 | `GET /api/dashboard` | cards + trend reflect the subtree |
