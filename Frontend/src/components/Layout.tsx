@@ -48,9 +48,38 @@ export default function Layout() {
   // Desktop: collapse to icon rail. Mobile: slide-in drawer.
   const [collapsed, setCollapsed] = useState(false);
   const [open, setOpen] = useState(false);
-  const [openGroups, setOpenGroups] = useState<string[]>(() =>
-    nav.filter((g) => g.children?.some((c) => c.to === location.pathname)).map((g) => g.label)
-  );
+  // Sections start open so the sidebar shows the whole menu on arrival, matching the
+  // reference design. Each heading is then a toggle. Persisted because a user who
+  // deliberately folds a section away should not find it re-opened on every reload.
+  const GROUPS_KEY = 'cip_nav_open_groups';
+  const [openGroups, setOpenGroups] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(GROUPS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed as string[];
+      }
+    } catch {
+      /* corrupt or unavailable storage - fall through to open-everything */
+    }
+    return nav.filter((g) => g.children?.length).map((g) => g.label);
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(GROUPS_KEY, JSON.stringify(openGroups));
+    } catch {
+      /* storage full or blocked - collapsing just won't persist */
+    }
+  }, [openGroups]);
+
+  // Navigating into a section that the user has folded away must reveal it, or the
+  // page they just opened would be invisible in the menu.
+  useEffect(() => {
+    const group = nav.find((g) => g.children?.some((c) => c.to === location.pathname));
+    if (!group) return;
+    setOpenGroups((prev) => (prev.includes(group.label) ? prev : [...prev, group.label]));
+  }, [location.pathname, nav]);
 
   // Close the mobile drawer on navigation + keep the active group open
   useEffect(() => {
@@ -70,7 +99,10 @@ export default function Layout() {
   // 15-minute idle sign-out. The server drops the session row at the same deadline;
   // this stops an untouched tab from continuing to display data that is already invalid.
   const idleWarning = useIdleTimeout(() => {
+    // Order matters: record the reason BEFORE clearing the session. clearAuth() notifies
+    // subscribers, which can mount the login screen, and it reads this reason on mount.
     setLastSignOutReason('idle');
+    clearAuth();
     navigate('/login', { replace: true });
   });
 
@@ -128,20 +160,87 @@ export default function Layout() {
 
   const crumbs = BREADCRUMBS[location.pathname] || ['Dashboard'];
 
+  // Section headings are always expanded — the reference design shows every group open,
+  // so the group label is a heading rather than a disclosure toggle. `openGroups` is kept
+  // for the rarer third level (a leaf that itself has children), which does collapse.
+  const leafTitle = (label: string) => (collapsed ? label : undefined);
+
+  const renderLeaf = (c: NavGroup): JSX.Element => {
+    const kids = c.children?.filter((x) => !!x.to) ?? [];
+    if (kids.length) {
+      const isOpen = openGroups.includes(c.label);
+      return (
+        <div key={c.label} className={'nav-group nav-nested' + (isOpen ? ' expanded' : '')}>
+          <button
+            className="nav-item nav-group-toggle"
+            onClick={() => toggleGroup(c.label)}
+            title={leafTitle(c.label)}
+            aria-expanded={isOpen}
+          >
+            <Icon name={c.icon ?? 'layers'} size={14} />
+            <span className="nav-item-label">{c.label}</span>
+            <span className="nav-caret"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+          </button>
+          {isOpen && <div className="nav-submenu nav-submenu-open">{kids.map(renderLeaf)}</div>}
+        </div>
+      );
+    }
+    if (c.external) {
+      return (
+        <a
+          key={c.to}
+          className="nav-subitem"
+          href={c.to!}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={leafTitle(c.label)}
+        >
+          <Icon name={c.icon ?? 'fileText'} size={14} />
+          <span className="nav-item-label">{c.label}</span>
+        </a>
+      );
+    }
+    return (
+      <NavLink
+        key={c.to}
+        to={c.to!}
+        end={c.end}
+        className={({ isActive }) => 'nav-subitem' + (isActive ? ' active' : '')}
+        title={leafTitle(c.label)}
+      >
+        <Icon name={c.icon ?? 'fileText'} size={14} />
+        <span className="nav-item-label">{c.label}</span>
+      </NavLink>
+    );
+  };
+
   return (
     <div className={'layout' + (collapsed ? ' sidebar-collapsed' : '')}>
       {open && <div className="sidebar-backdrop" onClick={() => setOpen(false)} />}
 
       <aside className={'sidebar' + (open ? ' open' : '')}>
         <div className="brand">
-          <img src={`${import.meta.env.BASE_URL}assets/logo.png`} alt="1UP logo" className="brand-img" />
-          <span className="brand-name">UP</span>
+          <span className="brand-tile">
+            <img src={`${import.meta.env.BASE_URL}assets/logo.png`} alt="" className="brand-img" />
+          </span>
+          <span className="brand-text">
+            <span className="brand-name">CIBIL Analyzer</span>
+            <span className="brand-sub">Bank &amp; Credit Analysis</span>
+          </span>
           <button
             className="icon-btn sidebar-close"
             onClick={() => setOpen(false)}
             aria-label="Close menu"
           >
             <Icon name="close" size={18} />
+          </button>
+          <button
+            className="icon-btn brand-collapse"
+            onClick={() => setCollapsed(!collapsed)}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <Icon name={collapsed ? 'chevronsRight' : 'chevronsLeft'} size={15} />
           </button>
         </div>
 
@@ -158,9 +257,9 @@ export default function Layout() {
                   href={item.to}
                   target="_blank"
                   rel="noopener noreferrer"
-                  title={collapsed ? item.label : undefined}
+                  title={leafTitle(item.label)}
                 >
-                  <Icon name={item.icon ?? 'fileText'} /> <span>{item.label}</span>
+                  <Icon name={item.icon ?? 'fileText'} /> <span className="nav-item-label">{item.label}</span>
                 </a>
               ) : (
               <NavLink
@@ -168,62 +267,32 @@ export default function Layout() {
                 to={item.to}
                 end={item.end}
                 className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
-                title={collapsed ? item.label : undefined}
+                title={leafTitle(item.label)}
               >
-                <Icon name={item.icon ?? 'fileText'} /> <span>{item.label}</span>
+                <Icon name={item.icon ?? 'fileText'} /> <span className="nav-item-label">{item.label}</span>
               </NavLink>
               )
             ) : (
-              <div key={item.label} className={'nav-group' + (openGroups.includes(item.label) ? ' expanded' : '')}>
+              // Group label is a plain section heading; its children always render.
+              <div key={item.label} className={'nav-section' + (openGroups.includes(item.label) ? ' open' : '')}>
                 <button
-                  className="nav-item nav-group-toggle"
+                  className="nav-section-label"
                   onClick={() => toggleGroup(item.label)}
-                  title={collapsed ? item.label : undefined}
+                  aria-expanded={openGroups.includes(item.label)}
                 >
-                  <Icon name={item.icon ?? 'layers'} />
-                  <span>{item.label}</span>
-                  <span className="nav-caret"><Icon name="chevronDown" size={10} /></span>
+                  <Icon name={item.icon ?? 'layers'} size={13} />
+                  <span className="nav-section-text">{item.label}</span>
+                  <span className="nav-section-caret"><Icon name="chevronDown" size={12} /></span>
                 </button>
-                <div className="nav-submenu">
-                  {item.children!.filter((c) => !!c.to).map((c) =>
-                    c.external ? (
-                      <a
-                        key={c.to}
-                        className="nav-subitem"
-                        href={c.to!}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={collapsed ? c.label : undefined}
-                      >
-                        <span className="nav-dot" />
-                        <span>{c.label}</span>
-                      </a>
-                    ) : (
-                      <NavLink
-                        key={c.to}
-                        to={c.to!}
-                        className={({ isActive }) => 'nav-subitem' + (isActive ? ' active' : '')}
-                        title={collapsed ? c.label : undefined}
-                      >
-                        <span className="nav-dot" />
-                        <span>{c.label}</span>
-                      </NavLink>
-                    )
-                  )}
-                </div>
+                {openGroups.includes(item.label) && (
+                  <div className="nav-submenu nav-submenu-open">
+                    {item.children!.filter((c) => !!c.to).map(renderLeaf)}
+                  </div>
+                )}
               </div>
             )
           )}
         </nav>
-
-        <button
-          className="collapse-btn"
-          onClick={() => setCollapsed(!collapsed)}
-          aria-label="Toggle sidebar"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <Icon name={collapsed ? 'chevronsRight' : 'chevronsLeft'} size={15} />
-        </button>
 
         <div className="sidebar-footer">
           <div className="need-help">
@@ -234,6 +303,7 @@ export default function Layout() {
               <div className="need-help-title">Need Help?</div>
               <div className="need-help-sub">Contact support team</div>
             </div>
+            <span className="need-help-arrow"><Icon name="chevronRight" size={14} /></span>
           </div>
           <div className="side-user">
             <div className="avatar small">{user?.empName?.[0] || 'A'}</div>

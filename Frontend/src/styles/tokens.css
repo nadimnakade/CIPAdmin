@@ -1,0 +1,145 @@
+/*
+   CIPAdmin DESIGN TOKENS — v1 (Analyzer lineage, WCAG-corrected)
+   ------------------------------------------------------------------
+   Extracted from the CIBIL & Bank Statement Analyzer redesign, but
+   NORMALISED: the Analyzer shipped several tones that failed WCAG AA and
+   body text at 8-10px. Those values are deliberately NOT propagated.
+
+   Every --tone-*-fg / --tone-*-bg pair below was verified at >= 4.5:1 by
+   `npm run check:contrast` (Frontend/tools/check-contrast.mjs).
+   Do not hand-edit a colour without re-running that gate.
+*/
+
+:root {
+  /* ---------- Typography ---------- */
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, 'SF Mono', monospace;
+
+  /* Density floor: nothing smaller than 11px, and 11px is meta-only.
+     The Analyzer shipped 8px table headers and 9px body text; that is
+     deliberately not carried forward. */
+  --fs-2xs: 11px;   /* meta, footnotes — 4.5:1 required */
+  --fs-xs:  12px;   /* table body, dense UI — smallest readable body */
+  --fs-sm:  13px;   /* default dense body */
+  --fs-base:14px;   /* application body */
+  --fs-md:  16px;   /* modal title, lead-in */
+  --fs-lg:  19px;   /* empty-state heading */
+  --fs-xl:  24px;   /* page title (h1) */
+  --fs-2xl: 30px;   /* KPI figure */
+
+  --lh-tight: 1.25;
+  --lh-snug:  1.4;
+  --lh-normal:1.55;
+  --lh-loose: 1.75;
+
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semi:    600;
+  --fw-bold:    700;
+  --fw-heavy:   750; /* page titles only */
+
+  /* Negative tracking scales with size, as the Analyzer did. */
+  --ls-tight: -0.035em;
+  --ls-snug:  -0.025em;
+  --ls-wide:   0.055em; /* uppercase table headers */
+
+  /* ---------- Neutrals ---------- */
+  --c-ink:        #15294f; /* headings, primary text           10.9:1 */
+  --c-text:       #35476a; /* table body, paragraphs            8.6:1 */
+  --c-text-sub:   #5b6b85; /* secondary / helper text          5.4:1 */
+  --c-text-muted: #5b6b85; /* alias, kept for muscle memory     5.4:1 */
+  --c-text-invert:#ffffff;
+
+  --c-bg:         #f4f6fa; /* app canvas                        */
+  --c-surface:    #ffffff; /* card / panel surface             */
+  --c-surface-alt:#f8fafd; /* header rows, filter bars          */
+  --c-surface-sunk:#f2f5fa;
+
+  --c-line:       #e3eaf3; /* default hairline border           */
+  --c-line-soft:  #eef2f7; /* row separators                    */
+  --c-line-strong:#d7e1ef; /* dashed dropzone border            */
+
+  /* ---------- Brand / action ---------- */
+  --c-accent:      #195fe0; /* links, active nav, focus         */
+  --c-accent-hover:#1457d0;
+  --c-accent-deep: #1f3a5f; /* active tab / primary chrome       */
+  --c-accent-soft: #edf3ff; /* icon tile wash                    */
+  --c-action:      #2563eb; /* primary button fill               */
+  --c-action-hover:#1d4ed8;
+
+  /* ---------- Semantic tones (WCAG AA verified) ---------- */
+  --tone-green-fg:  #0f6b3d;  --tone-green-bg:  #e4f6ed;  /* 5.86 */
+  --tone-red-fg:    #b32a44;  --tone-red-bg:    #ffeaf0;  /* 5.49 */
+  --tone-blue-fg:   #1257a8;  --tone-blue-bg:   #e8f1ff;  /* 6.25 */
+  --tone-amber-fg:  #7a5406;  --tone-amber-bg:  #fff5d8;  /* 6.23 */
+  --tone-purple-fg: #5b32a8;  --tone-purple-bg: #f1ebff;  /* 7.33 */
+  --tone-neutral-fg:#4d5b70;  --tone-neutral-bg:#edf2f7;  /* 6.12 */
+
+  /* Chart series — distinguishable in order, per WCAG 1.4.1 */
+  --chart-1: #1257a8;
+  --chart-2: #0f6b3d;
+  --chart-3: #7a5406;
+  --chart-4: #5b32a8;
+  --chart-5: #b32a44;
+  --chart-credit: #0f6b3d;
+  --chart-debit:  #b32a44;
+
+  /* ---------- Spacing (4px base) ---------- */
+  --sp-1: 4px;   --sp-2: 6px;   --sp-3: 8px;   --sp-4: 10px;
+  --sp-5: 12px;  --sp-6: 14px;  --sp-7: 18px;  --sp-8: 20px;
+  --sp-9: 24px;  --sp-10: 32px;
+
+  /* ---------- Radii ---------- */
+  --r-xs: 4px;   /* badges, chips          */
+  --r-sm: 6px;   /* inputs, search         */
+  --r-md: 8px;   /* buttons, dropzones     */
+  --r-lg: 10px;  /* cards, panels          */
+  --r-xl: 14px;  /* page-level container   */
+  --r-pill: 999px;
+
+  /* ---------- Elevation ---------- */
+  --sh-xs: 0 1px 2px rgba(21, 41, 79, 0.05);
+  --sh-sm: 0 2px 4px rgba(21, 41, 79, 0.06);
+  --sh-md: 0 3px 18px rgba(34, 59, 100, 0.06);
+  --sh-lg: 0 6px 18px rgba(15, 23, 42, 0.12);
+
+  /* ---------- Focus ---------- */
+  --focus-ring-color: #1d4ed8;  /* 6.70:1 on white — SC 1.4.11 */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* ---------- Motion ---------- */
+  --dur-fast:  150ms;
+  --dur-base:  200ms;
+  --dur-slow:  300ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---------- Breakpoints (mirror in JS) ---------- */
+  --bp-xl: 1450px;
+  --bp-lg: 1200px;
+  --bp-md: 700px;
+}
+
+/*
+   Every interactive element gets the SAME ring. Do not scope this to a page.
+   The Analyzer used #accaff at 1.66:1 — effectively invisible. Never repeat that.
+*/
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--r-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

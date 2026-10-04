@@ -127,8 +127,20 @@ var app = builder.Build();
 
 // When hosted as an IIS sub-application (e.g. https://1up.co.in/CIPAdmin_API/),
 // strip the path base so controllers keep matching /api/... routes.
+//
+// ORDER IS LOAD-BEARING. WebApplication would otherwise insert UseRouting at the very
+// start of the pipeline, and routing matches endpoints against the REQUEST path. With the
+// prefix still attached, /CIPAdmin_API/api/auth/login matches no controller route but does
+// match the catch-all from MapFallbackToFile("index.html"), so every prefixed API call
+// returned the SPA - or 405 for POST, because the static-file fallback only allows
+// GET/HEAD. Stripping the prefix first, then routing explicitly, keeps real API routes
+// winning over the SPA fallback.
 var pathBase = app.Configuration["PathBase"];
 if (!string.IsNullOrEmpty(pathBase)) app.UsePathBase(pathBase);
+
+// Declaring UseRouting here (instead of letting WebApplication add it implicitly at the
+// front) guarantees it runs AFTER UsePathBase.
+app.UseRouting();
 
 // Serve Swagger only outside Production so the API surface isn't exposed on the deployed server.
 var swaggerEnabled = app.Configuration.GetValue("Swagger:Enabled", app.Environment.IsDevelopment());

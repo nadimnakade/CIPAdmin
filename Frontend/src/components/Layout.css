@@ -1,0 +1,412 @@
+/* Left sidebar redesign. Scoped to .sidebar so it cannot leak into page content.
+   Legacy rules in styles.css (.sidebar, .brand, .nav-item, .nav-subitem,
+   .need-help, .side-user) are intentionally overridden here; they are removed in
+   the Phase 3 primitive pass rather than edited in two places. */
+
+.sidebar {
+  --sb-bg: #16243f;
+  --sb-bg-2: #1b2c4c;
+  --sb-tile: #2f6df6;
+  --sb-text: #b9c6dc;
+  --sb-text-strong: #ffffff;
+  --sb-heading: #8fa1c2;
+  --sb-hover: rgba(255, 255, 255, 0.07);
+  --sb-card: rgba(255, 255, 255, 0.055);
+  --sb-border: rgba(255, 255, 255, 0.08);
+
+  width: 248px;
+  background: linear-gradient(180deg, var(--sb-bg-2) 0%, var(--sb-bg) 100%);
+  border-right: 1px solid #101b30;
+  color: var(--sb-text);
+}
+
+/* ---------- brand ---------- */
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px 14px;
+  border-bottom: 1px solid var(--sb-border);
+}
+.brand-tile {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: var(--sb-tile);
+  box-shadow: 0 2px 8px rgba(47, 109, 246, 0.35);
+}
+.brand-tile .brand-img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+.brand-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.brand-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--sb-text-strong);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brand-sub {
+  font-size: 11px;
+  color: var(--sb-heading);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brand-collapse {
+  color: var(--sb-heading);
+  flex-shrink: 0;
+}
+.brand-collapse:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+.sidebar .sidebar-close {
+  color: var(--sb-heading);
+  flex-shrink: 0;
+}
+
+/* ---------- nav ---------- */
+
+.side-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+.nav-section {
+  margin-top: 12px;
+}
+.nav-section:first-child {
+  margin-top: 2px;
+}
+.nav-section-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--sb-heading);
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.nav-section-label:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+.nav-section-label svg {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.nav-section-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-section-caret {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+/* Collapsed sections point down-and-away; the rotation is what shows state. */
+.nav-section:not(.open) .nav-section-caret {
+  transform: rotate(-90deg);
+}
+
+.side-nav .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--sb-text);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.side-nav .nav-item > svg {
+  flex-shrink: 0;
+}
+.side-nav .nav-item:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+.side-nav .nav-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Active route: the solid blue pill from the reference. */
+.side-nav .nav-item.active,
+.side-nav .nav-subitem.active {
+  background: var(--sb-tile);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(47, 109, 246, 0.3);
+}
+.side-nav .nav-item.active:hover,
+.side-nav .nav-subitem.active:hover {
+  background: #2a63e0;
+  color: #ffffff;
+}
+
+.side-nav .nav-submenu {
+  display: grid;
+  gap: 1px;
+  margin-top: 1px;
+}
+.side-nav .nav-subitem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px 8px 12px;
+  border-radius: var(--r-md);
+  color: var(--sb-text);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.side-nav .nav-subitem > svg {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.side-nav .nav-subitem:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+.side-nav .nav-nested {
+  margin: 0;
+}
+.side-nav .nav-nested .nav-submenu-open {
+  padding-left: 10px;
+  border-left: 1px solid var(--sb-border);
+  margin-left: 20px;
+}
+.nav-caret {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  color: var(--sb-heading);
+  flex-shrink: 0;
+}
+
+/* ---------- footer ---------- */
+
+.sidebar-footer {
+  padding: 12px;
+  border-top: 1px solid var(--sb-border);
+  display: grid;
+  gap: 12px;
+}
+.sidebar .need-help {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px;
+  border: 1px solid var(--sb-border);
+  border-radius: var(--r-lg);
+  background: var(--sb-card);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.sidebar .need-help:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.sidebar .need-help-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: var(--sb-tile);
+  color: #ffffff;
+}
+.need-help-text {
+  min-width: 0;
+  flex: 1;
+}
+.sidebar .need-help-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sb-text-strong);
+  line-height: 1.25;
+}
+.sidebar .need-help-sub {
+  font-size: 11px;
+  color: var(--sb-heading);
+  line-height: 1.3;
+}
+.need-help-arrow {
+  display: grid;
+  place-items: center;
+  color: var(--sb-heading);
+  flex-shrink: 0;
+}
+
+.side-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.side-user .avatar.small {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.side-user-info {
+  min-width: 0;
+  flex: 1;
+}
+.sidebar .side-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sb-text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar .side-user-mail {
+  font-size: 11px;
+  color: var(--sb-heading);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar .side-user .icon-btn {
+  color: var(--sb-heading);
+  flex-shrink: 0;
+}
+.sidebar .side-user .icon-btn:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+
+/* ---------- collapsed rail ---------- */
+
+.sidebar-collapsed .sidebar {
+  width: 72px;
+}
+.sidebar-collapsed .brand {
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 8px;
+}
+.sidebar-collapsed .brand-text {
+  display: none;
+}
+.sidebar-collapsed .nav-section-label,
+.sidebar-collapsed .side-nav .nav-item-label,
+.sidebar-collapsed .nav-submenu,
+.sidebar-collapsed .nav-section-text {
+  display: none;
+}
+.sidebar-collapsed .nav-section-label {
+  justify-content: center;
+  padding: 8px 0;
+}
+.sidebar-collapsed .side-nav .nav-item {
+  justify-content: center;
+  padding: 10px 0;
+}
+.sidebar-collapsed .nav-caret {
+  display: none;
+}
+.sidebar-collapsed .need-help-text,
+.sidebar-collapsed .need-help-arrow,
+.sidebar-collapsed .side-user-info,
+.sidebar-collapsed .side-user .icon-btn {
+  display: none;
+}
+.sidebar-collapsed .need-help,
+.sidebar-collapsed .side-user {
+  justify-content: center;
+}
+
+/* The floating collapse button moved into the brand row. */
+.collapse-btn {
+  display: none;
+}
+
+/* ---------- mobile drawer ----------
+   styles.css has had `@media (max-width:768px){ .sidebar{ position:fixed;
+   transform:translateX(-105%) } }` for a while, but the transform never reaches the
+   element — position:fixed and width:250 from that same rule DO apply, transform
+   does not, so the closed drawer stayed pinned over the content. Verified by
+   disabling this stylesheet: the transform is still absent, i.e. it predates the
+   redesign. Re-declared here because this sheet loads after the global one. */
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-105%);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+}
+
+/* ---------- focus + motion ---------- */
+
+.sidebar :where(a, button):focus-visible {
+  outline: 2px solid #7ea6ff;
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-nav .nav-item,
+  .side-nav .nav-subitem,
+  .sidebar .need-help,
+  .nav-section-label,
+  .nav-section-caret,
+  .sidebar-collapsed .sidebar {
+    transition: none;
+  }
+}

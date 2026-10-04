@@ -10,6 +10,9 @@ public class DashboardResponse
 {
     public int CibilPulledToday { get; set; }
     public int CibilPulledTodayDelta { get; set; }      // % vs yesterday
+    public int CibilPulledYesterday { get; set; }
+    public int CibilPulledThisWeek { get; set; }       // trailing 7 days, matches Trend
+    public int CibilPulledThisMonth { get; set; }      // calendar month to date
     public int TotalCibilReports { get; set; }
     public int TotalCibilDelta { get; set; }            // % vs previous month
     public int ActiveEmployees { get; set; }
@@ -78,6 +81,16 @@ public class DashboardController : ControllerBase
             "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= CAST(GETDATE() AS DATE)" + pullFilter,
             "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= DATEADD(DAY, -1, CAST(GETDATE() AS DATE)) AND PULLED_DATE < CAST(GETDATE() AS DATE)" + pullFilter,
             scope.IsAdmin ? null : scope.SubtreeCodes);
+
+        // Period strip under the trend chart. These are counted here rather than summed from
+        // Trend in the UI: "this month" is a calendar month, which the 7-day Trend window
+        // cannot answer, and deriving it client-side would silently show the week instead.
+        res.CibilPulledYesterday = Convert.ToInt32(await _db.ScalarAsync(
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= DATEADD(DAY, -1, CAST(GETDATE() AS DATE)) AND PULLED_DATE < CAST(GETDATE() AS DATE)" + pullFilter));
+        res.CibilPulledThisWeek = Convert.ToInt32(await _db.ScalarAsync(
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= DATEADD(DAY, -6, CAST(GETDATE() AS DATE))" + pullFilter));
+        res.CibilPulledThisMonth = Convert.ToInt32(await _db.ScalarAsync(
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)" + pullFilter));
 
         res.TotalCibilReports = Convert.ToInt32(await _db.ScalarAsync(
             "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE 1=1" + pullFilter));

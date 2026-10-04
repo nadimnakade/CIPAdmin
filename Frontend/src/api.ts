@@ -44,11 +44,39 @@ export function getUser(): AuthUser | null {
 export function setAuth(token: string, user: AuthUser) {
   localStorage.setItem(TOKEN_KEY, token);
   localStorage.setItem(USER_KEY, JSON.stringify(user));
+  notifyAuthChange();
 }
 
 export function clearAuth() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+  notifyAuthChange();
+}
+
+/* --------------------------------------------------------------- auth change */
+
+/** Fired whenever the signed-in user is set or cleared. */
+const AUTH_CHANGE_EVENT = 'cip:authchange';
+
+function notifyAuthChange() {
+  try {
+    window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+  } catch {
+    /* no DOM (tests) — callers re-read getUser() directly */
+  }
+}
+
+/**
+ * Subscribe to sign-in / sign-out.
+ *
+ * Reading getUser() during render is not enough: React Router re-renders <Routes>
+ * on navigation, but the component that owns <Routes> does not re-run, so any
+ * `getUser() ? ... : ...` it computed stays stale for the rest of the session.
+ * That is what made sign-out bounce the user between /login and / in a loop.
+ */
+export function subscribeAuth(cb: () => void): () => void {
+  window.addEventListener(AUTH_CHANGE_EVENT, cb);
+  return () => window.removeEventListener(AUTH_CHANGE_EVENT, cb);
 }
 
 /* ------------------------------------------------------------ sign-out reason */
@@ -136,12 +164,18 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     // The server's session check distinguishes "you were idle" from "you signed in
     // elsewhere"; both arrive here as a bare 401, so read the reason the API attached.
     const reason = readSignOutReason(res);
-    clearAuth();
+    clearAuth(); // also notifies subscribers, so the app re-renders as signed out
     setLastSignOutReason(reason);
+    // The reason is carried to the login screen (which explains it in context and is
+    // where the user is actually sent). Keep this message short: it is only ever seen
+    // in the moment before the route swaps over, and it must not assert a cause the
+    // server did not report.
     throw new ApiError(
       reason === 'superseded'
         ? 'You have been signed out because this account was signed in somewhere else.'
-        : 'Your session expired after 15 minutes of inactivity. Please sign in again.',
+        : reason === 'idle'
+          ? 'Your session ended after 15 minutes of inactivity.'
+          : 'Your session has ended.',
       401,
     );
   }

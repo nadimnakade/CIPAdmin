@@ -20,7 +20,7 @@
 .bsa-workspace .btn.primary:hover:not(:disabled) { background: #174ec1; }
 .bsa-workspace .btn:disabled { opacity: .55; cursor: not-allowed; }
 .bsa-workspace .icon-btn { color: #64748b; flex-shrink: 0; }
-.bsa-workspace button:focus-visible, .bsa-workspace [role='button']:focus-visible { outline: 3px solid #accaff; outline-offset: 3px; }
+.bsa-workspace button:focus-visible, .bsa-workspace [role='button']:focus-visible { outline: 3px solid var(--focus-ring-color); outline-offset: 3px; }
 .bsa-workspace .bsa-head { margin: 0 0 18px; padding: 0; gap: 20px; background: transparent; }
 .bsa-workspace .bsa-head-left { gap: 15px; align-items: center; min-width: 0; }
 .bsa-workspace .bsa-head-left h1 { font-size: 24px; line-height: 1.25; font-weight: 750; letter-spacing: -.035em; }
@@ -66,7 +66,7 @@
 .bsa-password-card label small { font-size: 9px; font-weight: 400; }
 .bsa-workspace .bsa-pwd { border-color: #e4eaf3; border-radius: 6px; background: #f8fafd; padding: 0 4px 0 8px; }
 .bsa-workspace .bsa-pwd input { padding: 9px 2px; font-size: 11px; }
-.bsa-workspace .bsa-pwd:focus-within { outline: 2px solid #accaff; }
+.bsa-workspace .bsa-pwd:focus-within { outline: 2px solid var(--focus-ring-color); }
 .bsa-workspace .bsa-upload-actions { gap: 3px; justify-content: center; }
 .bsa-workspace .bsa-analyze-btn { min-height: 59px; font-size: 14px; font-weight: 650; padding: 14px 8px; }
 .bsa-workspace .bsa-clear-btn { border: 0; background: transparent; padding: 3px; font-size: 10px; color: var(--bsa-muted); }
@@ -105,10 +105,10 @@
 .bsa-register-tools { display: flex; align-items: center; gap: 8px; flex: 1; max-width: 380px; min-width: 0; }
 .bsa-search { display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--bsa-line); border-radius: 6px; height: 31px; flex: 1; min-width: 0; color: #7b89a0; }
 .bsa-workspace .bsa-search input { width: 100%; min-width: 0; background: none; border: 0; outline: none; padding: 4px 0; font-size: 10px; box-shadow: none; }
-.bsa-search:focus-within { outline: 2px solid #accaff; }
+.bsa-search:focus-within { outline: 2px solid var(--focus-ring-color); }
 .bsa-workspace .bsa-filter-toggle { height: 31px; padding: 5px 9px; font-size: 10px; }
 .bsa-filter-toggle span { background: #e8f0ff; padding: 2px 5px; border-radius: 4px; }
-.bsa-workspace .bsa-filter-toggle.is-filtered { color: #195fe0; border-color: #accaff; }
+.bsa-workspace .bsa-filter-toggle.is-filtered { color: #195fe0; border-color: var(--c-accent); }
 .bsa-filter-row { padding: 10px 12px; border-top: 1px solid #eef2f7; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; background: #f8fafd; }
 .bsa-filter-row label { display: grid; gap: 4px; font-size: 10px; color: #5f7291; }
 .bsa-workspace .bsa-filter-row select { padding: 6px 24px 6px 8px; border: 1px solid var(--bsa-line); border-radius: 5px; background: white; color: var(--bsa-ink); font-size: 11px; width: auto; }

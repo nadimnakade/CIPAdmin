@@ -12,6 +12,13 @@
 /tools-bsatest/bin/
 /tools-bsatest/obj/
 
+# Top-level deploy package produced by Backend/sql/build-deploy.sh.
+# This is the repo-root publish/ (frontend/ + backend/ + CIPAdmin-deploy.zip),
+# NOT the nested /Backend/publish/ above - both needed their own rule.
+/publish/
+/dist/
+/publish-*/
+
 # Frontend production bundle copied into the backend for single-app hosting
 /Backend/wwwroot/assets/
 /Backend/publish/wwwroot/assets/

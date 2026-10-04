@@ -18,58 +18,71 @@
 */
 
 :root {
-  --font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  /* ---------------------------------------------------------------------------
+     PHASE 2 - "cut the seam".
+     Every legacy name below is now an ALIAS onto the canonical Analyzer token
+     layer in styles/tokens.css. They are kept so the ~1,200 existing className
+     usages render correctly with zero JSX edits. New code should consume the
+     token names directly, not these aliases.
+     See docs/design-system/ROLLOUT.md.
+     --------------------------------------------------------------------------- */
+  --font: var(--font-sans);
+  /* Source Serif 4 retired: unreadable at the 12px uppercase table-header
+     size this app needs, and the Analyzer already overrides it. */
 
   /* Registry ink */
-  --primary: #1f3a5f;
+  --primary: var(--c-accent-deep);
   --primary-dark: #162a45;
-  --primary-light: #e7ebf2;
-  --ink: #1c2f4a;
-  --stamp: #b4531f;
-  --stamp-dark: #96431a;
+  --primary-light: var(--c-accent-soft);
+  --ink: var(--c-ink);
+  /* burnt-orange "stamp" retired - the app adopts the Analyzer's action blue */
+  --stamp: var(--c-action);
+  --stamp-dark: var(--c-action-hover);
 
-  /* Ledger paper — lightened toward the target design (white content field) */
-  --bg: #f5f6f8;
-  --card: #ffffff;
-  --surface: #f4f5f7;
+  /* Ledger paper */
+  --bg: var(--c-bg);
+  --card: var(--c-surface);
+  --surface: var(--c-surface-alt);
 
-  /* Sepia rules — neutralized to cool hairlines */
-  --border: #dfe2e8;
-  --border-light: #eceef2;
+  /* Hairline rules */
+  --border: var(--c-line);
+  --border-light: var(--c-line-soft);
 
-  /* Typography — ink ladder on cool paper */
+  /* Typography */
   --text: #1f2430;
   --text-secondary: #434b5c;
-  --muted: #6b7280;
-  --placeholder: #6b7280;
+  --muted: var(--c-text-sub);
+  --placeholder: var(--c-text-sub);
 
-  /* Vivid action blue — the active-nav pill and link voice (target design) */
-  --action: #2563eb;
-  --action-dark: #1d4ed8;
+  /* Vivid action blue */
+  --action: var(--c-action);
+  --action-dark: var(--c-action-hover);
 
-  /* Stamp status */
-  --green: #2e5d3a;
-  --green-light: #e6efe2;
+  /* Stamp status - re-based for WCAG AA on their tinted backgrounds */
+  --green: #0f6b3d;
+  --green-light: var(--tone-green-bg);
 
-  --red: #b3341f;
-  --red-light: #f8e8e2;
+  --red: #b32a44;
+  --red-light: var(--tone-red-bg);
 
-  --amber: #a16207;
-  --amber-light: #f7ecd7;
+  --amber: #7a5406;
+  --amber-light: var(--tone-amber-bg);
 
   /* Informational */
-  --info: #1f6f8b;
-  --info-light: #e6f1f4;
+  --info: #1257a8;
+  --info-light: var(--tone-blue-bg);
 
-  /* UI — squarer, file-cover geometry */
-  --radius: 8px;
-  --radius-sm: 5px;
-  --radius-lg: 10px;
+  /* UI geometry */
+  --radius: var(--r-lg);
+  --radius-sm: var(--r-sm);
+  --radius-lg: var(--r-lg);
 
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 6px rgba(16, 24, 40, 0.04);
-  --shadow-md: 0 4px 14px rgba(16, 24, 40, 0.10);
-  --ring: 0 0 0 3px rgba(37, 99, 235, 0.16);
+  --shadow: var(--sh-md);
+  --shadow-md: var(--sh-lg);
+  /* Focus ring for wrapped inputs (.input-wrap / .field draw this instead of a
+     real outline). The old rgba(37,99,235,0.16) composited to only 1.25:1 on
+     white - below WCAG 1.4.11's 3:1 floor. Now solid, 6.70:1. */
+  --ring: 0 0 0 3px var(--focus-ring-color);
 }
 
 * {
@@ -301,7 +314,6 @@ body {
   font-weight: 700;
   font-size: 16px;
   color: #f6f2e7;
-  font-family: var(--font-display);
   letter-spacing: 0.01em;
 }
 
@@ -535,7 +547,6 @@ body {
 
 .page-head h1,
 .center-title h1 {
-  font-family: var(--font-display);
   font-size: 26px;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -579,7 +590,7 @@ body {
 .card-head h3 {
   margin: 0;
   font-size: 15px;
-  font-family: var(--font-display);
+  font-weight: 600;
   color: var(--ink);
 }
 
@@ -1904,8 +1915,8 @@ body {
 
 .btn.warn {
   background: #fdf3e4;
-  color: var(--stamp-dark);
-  border: 1px solid rgba(180, 83, 31, 0.4);
+  color: #7a5406;
+  border: 1px solid #e6d3b4;
   margin-top: 8px;
 }
 
@@ -2013,7 +2024,6 @@ body {
 .badge.blue { background: var(--primary-light); color: var(--primary); }
 
 /* ── World adaptation: registry surfaces ───────────────────────────── */
-.badge.orange { background: #fdf3e4; color: var(--stamp-dark); }
 
 /* ---------- Access Control page ---------- */
 
@@ -2089,18 +2099,19 @@ body {
 .ocr-col-actions .icon-btn:hover, .ocr-row-actions .icon-btn:hover { opacity: 1; }
 .ocr-hint { margin: 10px 0 0; font-size: 12px; color: var(--muted, #6e6753); }
 .section-title { margin: 0; font-size: 15px; }
-.badge.orange { background: #fdf3e4; color: var(--stamp-dark); }
 @media (max-width: 900px) {
   .ocr-split { grid-template-columns: 1fr; }
   .ocr-preview { position: static; }
 }
+
+.badge.orange { background: #fdf3e4; color: #9a4514; }
 
 /* ── BSA Analyzer ───────────────────────────────────────────── */
 .bsa-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin: 10px;
     padding: 15px;
     background: white; }
 .bsa-head-left { display: flex; gap: 14px; align-items: flex-start; }
-.bsa-head-left h1 { margin: 0; font-size: 22px; font-family: var(--font-display); letter-spacing: -0.01em; }
+.bsa-head-left h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
 .bsa-head-left p { margin: 4px 0 0; font-size: 13px; }
 .bsa-head-icon { width: 48px; height: 48px; border-radius: 12px; background: var(--primary-light); color: #1f3a5f; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .bsa-history-btn { white-space: nowrap; }
@@ -2179,7 +2190,6 @@ body {
 /* ── Registry finishing details ─────────────────────────────────────── */
 
 .login-title {
-  font-family: var(--font-display);
   font-size: 24px;
   font-weight: 700;
   color: var(--ink);
@@ -2441,7 +2451,7 @@ fieldset.form-fields:disabled {
 .confirm-title {
   margin: 0 0 8px;
   font-size: 17px;
-  font-family: var(--font-display);
+  font-weight: 600;
   color: var(--ink);
 }
 

@@ -1,0 +1,148 @@
+/* EMI calculator + loan eligibility. Scoped to the classes these two pages use. */
+
+.inp {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #d8d1bf);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text, #26231b);
+  font-size: 13.5px;
+  font-family: inherit;
+}
+.inp.sm { padding: 5px 7px; font-size: 12.5px; }
+.inp:focus-visible {
+  outline: 2px solid var(--primary, #1f3a5f);
+  outline-offset: 1px;
+  border-color: var(--primary, #1f3a5f);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px 16px;
+}
+.form-grid .field { display: flex; flex-direction: column; gap: 4px; }
+.form-grid textarea.inp { resize: vertical; min-height: 54px; }
+
+.req { color: var(--red, #b42318); }
+
+.muted-note { font-size: 12.5px; color: var(--muted, #6e6753); margin: 10px 0 0; }
+.muted-warn { font-size: 12.5px; color: var(--amber, #b45309); font-weight: 600; }
+
+.alert.error {
+  background: #fef3f2;
+  border: 1px solid #fda29b;
+  border-left: 3px solid var(--red, #b42318);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #7a271a;
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+/* ---------------------------------------------------------------- EMI inputs */
+
+.emi-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px 16px;
+}
+
+/* ----------------------------------------------------------------- EMI tiles */
+
+.emi-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.emi-tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid var(--border, #d8d1bf);
+  border-left: 3px solid var(--primary, #1f3a5f);
+  border-radius: 10px;
+  padding: 13px 15px;
+}
+.emi-tile-blue { border-left-color: #2f6df6; }
+.emi-tile-amber { border-left-color: #b45309; }
+.emi-tile-green { border-left-color: #067647; }
+.emi-tile-slate { border-left-color: #475467; }
+
+.emi-tile-icon {
+  width: 34px; height: 34px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 9px;
+  background: var(--primary-light, #eef2f8);
+  color: var(--primary, #1f3a5f);
+}
+.emi-tile-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.emi-tile-label { font-size: 11.5px; color: var(--muted, #6e6753); text-transform: uppercase; letter-spacing: .04em; }
+.emi-tile-value { font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+
+/* -------------------------------------------------------------------- donut */
+
+.emi-split {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) 1fr;
+  gap: 20px;
+  align-items: center;
+}
+.donut-wrap { display: flex; flex-direction: column; align-items: center; }
+.donut { width: 100%; max-width: 220px; height: auto; }
+.donut-track { fill: none; stroke: var(--border, #e4dfd2); stroke-width: 22; }
+.donut-seg { fill: none; stroke-width: 22; }
+.donut-seg-loan { stroke: #2f6df6; }
+.donut-seg-interest { stroke: #b45309; }
+.donut-center-label { text-anchor: middle; font-size: 11px; fill: var(--muted, #6e6753); }
+.donut-center-value { text-anchor: middle; font-size: 15px; font-weight: 700; fill: var(--text, #26231b); }
+.donut-hint { text-align: center; }
+
+.emi-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.emi-legend li {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.swatch-loan { background: #2f6df6; }
+.swatch-interest { background: #b45309; }
+.legend-pct { color: var(--muted, #6e6753); font-variant-numeric: tabular-nums; }
+.legend-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* -------------------------------------------------------------- eligibility */
+
+.obs-wrap { margin-bottom: 14px; }
+.obs-add {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.2fr) minmax(160px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+.obs-add-btn { margin-bottom: 0; }
+
+.total-row td { font-weight: 700; background: var(--surface, #f5f2e9); }
+.amt-user { color: #7a271a; }
+
+.actions-row { display: flex; gap: 10px; align-items: center; margin: 0 0 16px; }
+.grp-head th {
+  text-align: center;
+  background: var(--surface, #f5f2e9);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted, #6e6753);
+}
+
+.data-table td.num, .data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 720px) {
+  .emi-split { grid-template-columns: 1fr; }
+  .obs-add { grid-template-columns: 1fr; }
+}

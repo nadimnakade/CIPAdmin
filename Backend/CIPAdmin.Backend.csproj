@@ -8,6 +8,14 @@
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 
+  <!-- A previous publish run into Backend/publish/ (and any nested publish/bin/obj)
+       would otherwise be picked up by the Web SDK's default Content glob and shipped
+       INSIDE the new output as backend\publish\appsettings.json - a duplicate config
+       that silently overrides nothing but confuses every deploy. Exclude them. -->
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);publish\**;bin\**;obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.2" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.11" />

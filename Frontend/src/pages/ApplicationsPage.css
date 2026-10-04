@@ -1,0 +1,151 @@
+/* Application section: search grid, wizard form, uploads, bulk insert, existing loans. */
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 14px;
+  align-items: end;
+}
+.filter-grid .field { display: flex; flex-direction: column; gap: 4px; }
+.filter-actions { display: flex; gap: 8px; align-items: center; }
+
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.table-wrap { overflow-x: auto; }
+.cell-strong { font-weight: 600; }
+.cell-sub { font-size: 12px; color: var(--muted, #6e6753); }
+.nowrap { white-space: nowrap; }
+.empty-cell { text-align: center; color: var(--muted, #6e6753); padding: 28px 12px !important; }
+.card-foot { padding: 12px 16px; border-top: 1px solid var(--border, #d8d1bf); }
+
+.icon-btn.danger:hover { color: var(--red, #b42318); border-color: var(--red, #b42318); }
+
+/* ------------------------------------------------------------------- wizard */
+
+.wizard {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.wizard-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #fff;
+  border: 1px solid var(--border, #d8d1bf);
+  border-radius: 10px;
+  padding: 8px;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+.rail-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 9px;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text, #26231b);
+}
+.rail-item:hover { background: var(--surface, #f5f2e9); }
+.rail-item.active {
+  background: var(--primary-light, #eef2f8);
+  border-color: var(--primary, #1f3a5f);
+}
+.rail-item:focus-visible { outline: 2px solid var(--primary, #1f3a5f); outline-offset: 1px; }
+
+.rail-dot {
+  width: 22px; height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--surface, #f5f2e9);
+  border: 1px solid var(--border, #d8d1bf);
+  color: var(--muted, #6e6753);
+  font-size: 11.5px;
+  font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.rail-item.active .rail-dot {
+  background: var(--primary, #1f3a5f);
+  border-color: var(--primary, #1f3a5f);
+  color: #fff;
+}
+.rail-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.rail-title { font-size: 13px; font-weight: 600; }
+.rail-blurb { font-size: 11.5px; color: var(--muted, #6e6753); }
+
+.wizard-main { min-width: 0; }
+.wizard-foot { display: flex; align-items: center; gap: 12px; }
+.wizard-foot-mid { flex: 1; text-align: center; min-width: 0; }
+
+/* ---------------------------------------------------------------- bulk page */
+
+.issue-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: #7a271a;
+  max-height: 260px;
+  overflow: auto;
+}
+.col-list {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 12.5px;
+  color: var(--muted, #6e6753);
+  columns: 3;
+  column-gap: 20px;
+}
+
+/* --------------------------------------------------------------- punch in/out */
+
+.caller-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+
+.caller-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border, #d8d1bf);
+  border-radius: 8px;
+  background: var(--surface, #f5f2e9);
+  columns: 2;
+  column-gap: 18px;
+}
+.caller-list li { break-inside: avoid; }
+.caller-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.caller-list label:hover { background: #fff; }
+.caller-list input { accent-color: var(--primary, #1f3a5f); }
+
+@media (max-width: 900px) {
+  .wizard { grid-template-columns: 1fr; }
+  .wizard-rail {
+    position: static;
+    max-height: none;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .rail-item { min-width: 168px; }
+  .col-list { columns: 1; }
+  .caller-list { columns: 1; }
+  .wizard-foot { flex-wrap: wrap; }
+  .wizard-foot-mid { order: 3; width: 100%; text-align: left; }
+}

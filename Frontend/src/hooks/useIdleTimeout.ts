@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { clearAuth, getToken } from '../api';
+import { getToken } from '../api';
 
 /** Minutes of inactivity before the client signs itself out. Mirrors Jwt:IdleTimeoutMinutes. */
 export const IDLE_MINUTES = 15;
@@ -33,7 +33,9 @@ export interface IdleWarning {
  * populated screen full of data that is no longer valid. This signs the user out locally at
  * the same deadline and warns a minute beforehand.
  *
- * @param onIdle called after the local session is cleared, so the caller can navigate.
+ * @param onIdle called when the deadline passes. The caller owns clearing the session and
+ *   navigating, so it can record WHY the session ended before the sign-out is announced —
+ *   the login screen reads that reason on mount and would otherwise miss it.
  */
 export function useIdleTimeout(onIdle: () => void): IdleWarning | null {
   const [warning, setWarning] = useState<IdleWarning | null>(null);
@@ -78,7 +80,6 @@ export function useIdleTimeout(onIdle: () => void): IdleWarning | null {
       if (remaining <= 0) {
         window.clearInterval(tick);
         ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity));
-        clearAuth();
         onIdleRef.current();
         return;
       }
