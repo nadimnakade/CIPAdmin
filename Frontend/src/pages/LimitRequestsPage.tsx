@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager, SortArrow, useTableView } from '../components/tableView';
 
 interface LimitRequestInfo {
@@ -25,7 +27,6 @@ export default function LimitRequestsPage() {
   const [status, setStatus] = useState<StatusFilter>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [deciding, setDeciding] = useState<number | null>(null);
   const [overrideLimit, setOverrideLimit] = useState('');
 
@@ -54,10 +55,15 @@ export default function LimitRequestsPage() {
 
   const decide = async (r: LimitRequestInfo, approve: boolean) => {
     const limit = overrideLimit.trim() ? Number(overrideLimit) : r.requestedLimit;
-    const msg = approve
-      ? `Approve ${r.empName}'s request for ${r.requestedLimit} pulls this month${limit !== r.requestedLimit ? ` (overridden to ${limit})` : ''}?`
-      : `Reject ${r.empName}'s request for ${r.requestedLimit} pulls?`;
-    if (!confirm(msg)) return;
+    const ok = await confirmAction({
+      title: approve ? 'Approve this limit request?' : 'Reject this limit request?',
+      text: approve
+        ? `${r.empName} will be granted ${limit} CIBIL pull${limit === 1 ? '' : 's'} this month.`
+        : `${r.empName}'s request for ${r.requestedLimit} pulls will be declined.`,
+      confirmText: approve ? 'Approve' : 'Reject',
+      tone: approve ? 'primary' : 'danger',
+    });
+    if (!ok) return;
     setDeciding(r.requestId);
     setError('');
     try {
@@ -65,7 +71,7 @@ export default function LimitRequestsPage() {
         approve,
         approvedLimit: approve ? limit : null,
       });
-      setNotice(`Request ${approve ? 'approved' : 'rejected'} for ${r.empName}.`);
+      toast.success(`Request ${approve ? 'approved' : 'rejected'} for ${r.empName}.`);
       setOverrideLimit('');
       load();
     } catch (e) {
@@ -86,8 +92,6 @@ export default function LimitRequestsPage() {
         </div>
         {pendingCount > 0 && <span className="badge pending">{pendingCount} pending</span>}
       </div>
-
-      {notice && <div className="alert success">{notice}</div>}
 
       <div className="card">
         <div className="table-toolbar">

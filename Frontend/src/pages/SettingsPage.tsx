@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError, getUser } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager, SortArrow, useTableView } from '../components/tableView';
 
 interface EmpLimitRow {
@@ -268,7 +270,11 @@ export default function SettingsPage() {
           <button
             className="btn warn"
             onClick={async () => {
-              if (!confirm('Scan the pdf files folder and import legacy reports?')) return;
+              if (!(await confirmAction({
+                title: 'Import legacy reports?',
+                text: 'The pdf files folder is scanned and unregistered reports are registered against their PANs.\nSafe to run multiple times — already-registered PANs are skipped.',
+                confirmText: 'Scan and import',
+              }))) return;
               setSaving(true);
               setMessage(null);
               try {
@@ -276,7 +282,7 @@ export default function SettingsPage() {
                 const detail = res.skippedNoPattern !== undefined
                   ? ` (${res.skippedKnown ?? 0} already registered, ${res.skippedNoPattern ?? 0} unrecognized name)`
                   : '';
-                setMessage({ kind: 'ok', text: `Imported ${res.imported} report(s); ${res.skipped} file(s) skipped${detail}. Folder: ${res.root}` });
+                toast.success(`Imported ${res.imported} report(s); ${res.skipped} file(s) skipped${detail}.`, `Folder: ${res.root}`);
               } catch (err) {
                 setMessage({ kind: 'err', text: err instanceof ApiError ? err.message : 'Import failed.' });
               } finally {

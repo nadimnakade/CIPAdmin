@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, fetchReportPdf, ApiError, getUser } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
 
 interface CibilReportInfo {
   reportId: number;
@@ -241,7 +242,14 @@ export default function CibilCheckerPage() {
   };
 
   const regenerate = async () => {
-    if (!confirm(`Regenerate the CIBIL report for ${form.panCard.trim().toUpperCase()}?\n\nThe existing PDF for this month will be REPLACED with a fresh pull (uses one vendor credit).`)) return;
+    const pan = form.panCard.trim().toUpperCase();
+    const ok = await confirmAction({
+      title: `Regenerate the report for ${pan}?`,
+      text: 'The existing PDF for this month is REPLACED with a fresh pull.\nThis uses one vendor credit.',
+      confirmText: 'Regenerate',
+      tone: 'danger',
+    });
+    if (!ok) return;
     setMessage(null);
     setLoading(true);
     try {

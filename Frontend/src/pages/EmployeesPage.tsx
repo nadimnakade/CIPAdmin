@@ -2,6 +2,9 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, ApiError, getToken, isAdminUser, apiUrl } from '../api';
 import Icon from '../components/Icon';
 import { useTableView, Pager, SortArrow } from '../components/tableView';
+import { trackedFetch } from '../lib/loading';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 
 interface DidRow {
   didId: number;
@@ -61,7 +64,7 @@ export default function EmployeesPage() {
   const [designations, setDesignations] = useState<DesignationOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  
 
   // Inline add panel (screenshot layout) instead of a modal
   const [showAdd, setShowAdd] = useState(false);
@@ -106,7 +109,7 @@ export default function EmployeesPage() {
     if (search) params.set('search', search);
     if (status) params.set('status', status);
     if (designationId) params.set('designationId', designationId);
-    fetch(apiUrl('/api/employees/dids/export?' + params.toString()), {
+    trackedFetch(apiUrl('/api/employees/dids/export?' + params.toString()), {
       headers: { Authorization: `Bearer ${getToken()}` },
     })
       .then(async (res) => {
@@ -142,8 +145,6 @@ export default function EmployeesPage() {
           <Icon name={showAdd ? 'close' : 'plus'} /> {showAdd ? 'Close Panel' : 'Add Employee'}
         </button>
       </div>
-
-      {notice && <div className="alert success">{notice}</div>}
 
       <div className="stats-grid did-stats">
         <div className="card stat-card">
@@ -260,10 +261,16 @@ export default function EmployeesPage() {
                           className="icon-btn danger"
                           title="Release DID"
                           onClick={async () => {
-                            if (!confirm(`Release SIP username ${r.didNumber} (extension ${r.extensionNumber || '—'})?`)) return;
+                            const ok = await confirmAction({
+                              title: 'Release this SIP username?',
+                              text: `SIP username ${r.didNumber} (extension ${r.extensionNumber || '—'}) is freed for reassignment.`,
+                              confirmText: 'Release',
+                              tone: 'danger',
+                            });
+                            if (!ok) return;
                             try {
                               await api.delete('/api/employees/dids/' + r.didId);
-                              setNotice(`SIP username ${r.didNumber} released.`);
+                              toast.success(`SIP username ${r.didNumber} released.`);
                               load();
                             } catch (e) {
                               setError(e instanceof ApiError ? e.message : 'Release failed');
@@ -303,7 +310,7 @@ export default function EmployeesPage() {
           onClose={() => setShowAdd(false)}
           onSaved={(msg) => {
             setShowAdd(false);
-            setNotice(msg);
+            toast.success(msg);
             load();
           }}
         />
@@ -314,7 +321,7 @@ export default function EmployeesPage() {
           onClose={() => setChangeRow(null)}
           onSaved={(msg) => {
             setChangeRow(null);
-            setNotice(msg);
+            toast.success(msg);
             load();
           }}
         />

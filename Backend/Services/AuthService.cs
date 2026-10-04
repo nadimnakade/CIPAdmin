@@ -5,12 +5,12 @@ namespace CIPAdmin.Backend.Services;
 
 public interface IAuthService
 {
-    Task<LoginResponse> CheckCredentialAsync(LoginRequest request, string clientIp, string hostName);
-    Task<LoginResponse> VerifyOtpAsync(string username, string code, bool rememberMe, string clientIp);
+    Task<LoginResponse> CheckCredentialAsync(LoginRequest request, string clientIp, string hostName, string? userAgent = null);
+    Task<LoginResponse> VerifyOtpAsync(string username, string code, bool rememberMe, string clientIp, string? userAgent = null);
     Task<UserSessionDto?> GetSessionByEmpCodeAsync(int empCode);
     Task LogLogoutAsync(int empCode, string jti);
     /// <summary>Exchange a one-time SSO ticket (minted by the legacy CIPPortal) for a JWT session.</summary>
-    Task<LoginResponse> ExchangeSsoTicketAsync(string ticket, string clientIp);
+    Task<LoginResponse> ExchangeSsoTicketAsync(string ticket, string clientIp, string? userAgent = null);
 }
 
 /// <summary>Rejected because the employee is not whitelisted for web access.</summary>
@@ -26,17 +26,18 @@ public class AuthService : IAuthService
     private readonly ITotpService _totp;
     private readonly IAccessControlService _access;
     private readonly IConfiguration _config;
+    private readonly IUserSessionService _sessions;
     private readonly ILogger<AuthService> _logger;
 
-    public AuthService(IDbContext db, ITokenService tokens, ITotpService totp, IAccessControlService access, IConfiguration config, ILogger<AuthService> logger)
+    public AuthService(IDbContext db, ITokenService tokens, ITotpService totp, IAccessControlService access, IConfiguration config, IUserSessionService sessions, ILogger<AuthService> logger)
     {
-        _db = db; _tokens = tokens; _totp = totp; _access = access; _config = config; _logger = logger;
+        _db = db; _tokens = tokens; _totp = totp; _access = access; _config = config; _sessions = sessions; _logger = logger;
     }
 
     /// <summary>Message shown when a valid user is not whitelisted for web access.</summary>
     public const string NoAccessMessage = "You don't have access to this website. Please contact administrator.";
 
-    public async Task<LoginResponse> CheckCredentialAsync(LoginRequest request, string clientIp, string hostName)
+    public async Task<LoginResponse> CheckCredentialAsync(LoginRequest request, string clientIp, string hostName, string? userAgent = null)
     {
         var username = (request.Username ?? "").Trim();
         var dt = await _db.QueryAsync(@"
@@ -103,12 +104,14 @@ public class AuthService : IAuthService
         var role = (row["ROLE_ID"] == DBNull.Value ? 0 : Convert.ToInt32(row["ROLE_ID"]));
         var roleName = row["ROLE_NAME"].ToString() ?? "";
         var (token, expires, jti) = _tokens.CreateToken(empCode, session.Username, session.EmpName, role, roleName);
+        // Registers the session, invalidating any token this employee held before.
+        await _sessions.StartSessionAsync(empCode, jti, clientIp, userAgent);
         session.Token = token;
         session.TokenExpiresAt = expires;
         return new LoginResponse { Valid = true, NextStep = "done", User = session };
     }
 
-    public async Task<LoginResponse> VerifyOtpAsync(string username, string code, bool rememberMe, string clientIp)
+    public async Task<LoginResponse> VerifyOtpAsync(string username, string code, bool rememberMe, string clientIp, string? userAgent = null)
     {
         var dt = await _db.QueryAsync(@"
             SELECT TOP 1 EMP_CODE, EMP_NAME, USERNAME, DESIG_ID, ROLE_ID, LOCATION_ID, EMAIL_ID,
@@ -153,7 +156,8 @@ public class AuthService : IAuthService
         await LogLoginAsync(empCode, username, clientIp, "verify-otp", "SUCCESS");
 
         var roleName = row["ROLE_NAME"].ToString() ?? "";
-        var (token, expires, _) = _tokens.CreateToken(empCode, session.Username, session.EmpName, session.RoleId, roleName);
+        var (token, expires, jti) = _tokens.CreateToken(empCode, session.Username, session.EmpName, session.RoleId, roleName);
+        await _sessions.StartSessionAsync(empCode, jti, clientIp, userAgent);
         session.Token = token;
         session.TokenExpiresAt = expires;
         return new LoginResponse { Valid = true, NextStep = "done", User = session };
@@ -176,7 +180,7 @@ public class AuthService : IAuthService
     /// Authenticator step) completes, then redirects here. The ticket is single-use and
     /// short-lived; this method atomically consumes it and issues this app's own JWT.
     /// The web-access gate applies exactly as in an ordinary login.</summary>
-    public async Task<LoginResponse> ExchangeSsoTicketAsync(string ticket, string clientIp)
+    public async Task<LoginResponse> ExchangeSsoTicketAsync(string ticket, string clientIp, string? userAgent = null)
     {
         var t = (ticket ?? "").Trim();
         if (t.Length == 0 || t.Length > 64 || !System.Text.RegularExpressions.Regex.IsMatch(t, @"^[A-Za-z0-9_-]+$"))
@@ -218,6 +222,7 @@ public class AuthService : IAuthService
         var session = MapSession(row);
         var roleName = row["ROLE_NAME"].ToString() ?? "";
         var (token, expires, jti) = _tokens.CreateToken(empCode, session.Username, session.EmpName, session.RoleId, roleName);
+        await _sessions.StartSessionAsync(empCode, jti, clientIp, userAgent);
         session.Token = token;
         session.TokenExpiresAt = expires;
         await LogLoginAsync(empCode, session.Username, clientIp, "sso-exchange", "SUCCESS");
@@ -226,6 +231,10 @@ public class AuthService : IAuthService
 
     public async Task LogLogoutAsync(int empCode, string jti)
     {
+        // End the session FIRST: a stale tab signing out must not remove a newer session,
+        // and EndSessionAsync guards on the JTI so it cannot.
+        await _sessions.EndSessionAsync(empCode, jti);
+
         await _db.ExecuteAsync(@"
             UPDATE dbo.TBL_CIP_LOGIN_LOGS SET STATUS = 'LOGOUT', LOGOUT_TIME = GETDATE()
             WHERE EMP_CODE = @id AND TOKEN_JTI = @jti AND STATUS = 'SUCCESS'",

@@ -108,11 +108,30 @@ public class BsaGovtSchemeRow
     public string Type { get; set; } = "";
 }
 
+public class BsaClassifiedTransaction : BsaMeta
+{
+    public string Date { get; set; } = "";
+    public string Description { get; set; } = "";
+    public decimal Debit { get; set; }
+    public decimal Credit { get; set; }
+    public decimal Balance { get; set; }
+    public string Category { get; set; } = "Other";
+    public string Counterparty { get; set; } = "";
+    public string Instrument { get; set; } = "";
+    public string Activity { get; set; } = "";
+    public bool NeedsReview { get; set; } = true;
+    public string ClassificationReason { get; set; } = "No reliable category signal in the narration.";
+}
+
 public class BsaStockMarketRow : BsaMeta
 {
     public string Date { get; set; } = "";
     public string Direction { get; set; } = "";
     public string Platform { get; set; } = "";
+    public string Segment { get; set; } = "Unspecified";
+    public string Activity { get; set; } = "";
+    public bool NeedsReview { get; set; }
+    public string ClassificationReason { get; set; } = "";
     public decimal Amount { get; set; }
     public string Description { get; set; } = "";
 }
@@ -153,11 +172,35 @@ public class BsaInsuranceRow : BsaMeta
 
 public class BsaSipRow : BsaMeta
 {
+    public string InvestmentType { get; set; } = "Mutual fund purchase";
     public string Date { get; set; } = "";
     public string FundName { get; set; } = "";
     public string Platform { get; set; } = "";
     public decimal Amount { get; set; }
     public string Description { get; set; } = "";
+}
+
+/// <summary>
+/// A securities / investment movement found in the statement: demat and RTA
+/// debits (buying mutual funds, stocks or bonds), demat credits (sales, dividends,
+/// redemptions) and portfolio credits in general.
+/// </summary>
+public class BsaSecuritiesRow : BsaMeta
+{
+    public string Date { get; set; } = "";
+    public string Description { get; set; } = "";
+
+    /// <summary>Outflow (purchase) or Inflow (sale / dividend / redemption).</summary>
+    public string Direction { get; set; } = "";
+
+    /// <summary>Demat / RTA / DP / Broker / Portfolio — the counterparty rail.</summary>
+    public string Platform { get; set; } = "";
+
+    /// <summary>Mutual Fund | Equity | Bond/Debt | Insurance-linked | Portfolio | Securities.</summary>
+    public string Instrument { get; set; } = "";
+    public string Activity { get; set; } = "";
+
+    public decimal Amount { get; set; }
 }
 
 public class BsaAppLoanRow : BsaMeta
@@ -266,6 +309,7 @@ public class BsaInsights
 
 public class BsaAnalysisResult
 {
+    public List<BsaClassifiedTransaction> Transactions { get; set; } = new();
     public BsaAccountSummary AccountSummary { get; set; } = new();
     public List<BsaSalaryRow> Salary { get; set; } = new();
     public List<BsaPfRow> PfEpfo { get; set; } = new();
@@ -279,6 +323,8 @@ public class BsaAnalysisResult
     public List<BsaUtilityRow> Utilities { get; set; } = new();
     public List<BsaCreditCardRow> CreditCardPayments { get; set; } = new();
     public List<BsaBounceRow> BounceCharges { get; set; } = new();
+    /// <summary>Securities / investment activity (demat, RTA, MF, bonds).</summary>
+    public List<BsaSecuritiesRow> Securities { get; set; } = new();
     public List<BsaStockMarketRow> StockMarket { get; set; } = new();
     public List<BsaApyRow> ApyPension { get; set; } = new();
     public List<BsaGovtSchemeRow> GovtSchemeCredits { get; set; } = new();

@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api, ApiError, apiUrl } from '../api';
 import Icon from '../components/Icon';
 import { Pager, SortArrow } from '../components/tableView';
+import { trackedFetch } from '../lib/loading';
 
 interface ReportTypeDef {
   value: number;
@@ -80,7 +81,7 @@ export default function GenericReportsPage() {
     setExporting(true);
     setError('');
     try {
-      const res = await fetch(apiUrl('/api/generic-reports/export'), {
+      const res = await trackedFetch(apiUrl('/api/generic-reports/export'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

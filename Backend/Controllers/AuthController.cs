@@ -27,7 +27,7 @@ public class AuthController : ControllerBase
         {
             var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
             var host = Request.Headers["Host"].ToString();
-            var res = await _auth.CheckCredentialAsync(request, ip, host);
+            var res = await _auth.CheckCredentialAsync(request, ip, host, Request.Headers["User-Agent"].ToString());
             return Ok(res);
         }
         catch (Exception ex)
@@ -41,11 +41,10 @@ public class AuthController : ControllerBase
     [HttpPost("verify-otp")]
     [AllowAnonymous]
     public async Task<ActionResult<LoginResponse>> VerifyOtp([FromBody] OtpRequest request, [FromQuery] bool rememberMe = false)
-    {
-        var res = await _auth.VerifyOtpAsync(request.Username, request.Code, rememberMe, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "");
+    {        var res = await _auth.VerifyOtpAsync(request.Username, request.Code, rememberMe, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "", Request.Headers["User-Agent"].ToString());
         if (!res.Valid) return Unauthorized(res);
         return Ok(res);
-  }
+    }
 
     /// <summary>Step 2b: enroll a new authenticator secret; the URI encodes into a QR code on the client.</summary>
     [HttpPost("enroll-otp")]
@@ -53,7 +52,7 @@ public class AuthController : ControllerBase
     public async Task<ActionResult<LoginResponse>> EnrollOtp([FromBody] OtpRequest request)
     {
         // EnrollOtp returns the provisioning URI; VerifyOtp confirms the first code and marks enrollment.
-        var res = await _auth.VerifyOtpAsync(request.Username, request.Code, false, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "");
+        var res = await _auth.VerifyOtpAsync(request.Username, request.Code, false, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "", Request.Headers["User-Agent"].ToString());
         if (!res.Valid) return Unauthorized(res);
         return Ok(res);
     }
@@ -65,7 +64,7 @@ public class AuthController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult<LoginResponse>> Sso([FromQuery] string ticket)
     {
-        var res = await _auth.ExchangeSsoTicketAsync(ticket, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "");
+        var res = await _auth.ExchangeSsoTicketAsync(ticket, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "", Request.Headers["User-Agent"].ToString());
         if (!res.Valid) return Unauthorized(res);
         return Ok(res);
     }

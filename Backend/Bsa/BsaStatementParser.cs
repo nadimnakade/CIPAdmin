@@ -15,12 +15,16 @@ public static class BsaStatementParser
 {
     private static readonly Regex MoneyRe = new(@"(?:\d{1,3}(?:,\s?\d{2,3})+|\d+)\.\d{2}", RegexOptions.Compiled);
 
-    public static List<BsaTransaction> ParseFile(byte[] bytes, string originalName)
+    /// <summary>
+    /// Parse an uploaded statement. <paramref name="password"/> is only used for
+    /// PDFs — CSV/XLSX/TXT can't be encrypted the same way, so it's ignored there.
+    /// </summary>
+    public static List<BsaTransaction> ParseFile(byte[] bytes, string originalName, string? password = null)
     {
         var ext = Path.GetExtension(originalName).ToLowerInvariant();
         return ext switch
         {
-            ".pdf" => ParsePdf(bytes),
+            ".pdf" => ParsePdf(bytes, password),
             ".csv" => ParseCsv(bytes),
             ".xlsx" or ".xls" => ParseXlsx(bytes),
             ".txt" => ParseText(Encoding.UTF8.GetString(bytes)),
@@ -61,9 +65,9 @@ public static class BsaStatementParser
 
     // ── PDF ─────────────────────────────────────────────────────────
 
-    private static List<BsaTransaction> ParsePdf(byte[] bytes)
+    private static List<BsaTransaction> ParsePdf(byte[] bytes, string? password = null)
     {
-        var raw = ExtractPdfText(bytes);
+        var raw = ExtractPdfText(bytes, password);
         if (raw.Trim().Length < 50)
             throw new BsaException(
                 "No extractable text found in this PDF. This looks like a scanned/image-only statement. Please export CSV/XLSX from netbanking or download a text-based PDF.",
@@ -73,6 +77,23 @@ public static class BsaStatementParser
         var union = ParseUnionBankText(raw);
         if (union.Count > best.Count) best = union;
 
+        // GetWords() emits one long stream per page; preserve physical lines as a
+        // second candidate so ordinary Debit/Credit/Balance tables remain rows.
+        // Keep the original streaming candidate for bank-specific layouts.
+        var lineText = ExtractPdfText(bytes, password, preserveLines: true);
+        var lineRows = ParseText(lineText);
+        if (lineRows.Count > best.Count) best = lineRows;
+
+        // SBI detailed statements need the column-signature parser. It is gated on
+        // the SBI header markers so no other bank's statement can be diverted
+        // into it, and it only wins when it actually finds more rows — otherwise
+        // the normal parser's result is kept.
+        if (LooksLikeSbiStatement(raw))
+        {
+            var sbi = ParseSbiStatement(raw);
+            if (sbi.Count > best.Count) best = sbi;
+        }
+
         if (best.Count >= 1) return best;
 
         throw new BsaException(
@@ -81,7 +102,7 @@ public static class BsaStatementParser
     }
 
     /// <summary>Extract raw text from a PDF. Used for statements and CIBIL reports (with password).</summary>
-    public static string ExtractPdfText(byte[] bytes, string? password = null, bool isCibil = false)
+    public static string ExtractPdfText(byte[] bytes, string? password = null, bool isCibil = false, bool preserveLines = false)
     {
         try
         {
@@ -91,9 +112,23 @@ public static class BsaStatementParser
                 : PdfDocument.Open(bytes, new ParsingOptions { Password = password.Trim() });
             foreach (var page in doc.GetPages())
             {
-                foreach (var word in page.GetWords())
-                    sb.Append(word.Text).Append(' ');
-                sb.Append('\n');
+                if (preserveLines)
+                {
+                    foreach (var line in page.GetWords()
+                        .GroupBy(w => Math.Round(w.BoundingBox.Bottom / 3))
+                        .OrderByDescending(g => g.Key))
+                    {
+                        foreach (var word in line.OrderBy(w => w.BoundingBox.Left))
+                            sb.Append(word.Text).Append(' ');
+                        sb.Append('\n');
+                    }
+                }
+                else
+                {
+                    foreach (var word in page.GetWords())
+                        sb.Append(word.Text).Append(' ');
+                    sb.Append('\n');
+                }
             }
             return sb.ToString();
         }
@@ -102,13 +137,18 @@ public static class BsaStatementParser
             var msg = (e.Message ?? "").ToString();
             if (Regex.IsMatch(msg, "password", RegexOptions.IgnoreCase) || Regex.IsMatch(msg, "encrypted", RegexOptions.IgnoreCase))
             {
+                var supplied = !string.IsNullOrWhiteSpace(password);
                 if (isCibil)
                     throw new BsaException(
-                        !string.IsNullOrWhiteSpace(password)
+                        supplied
                             ? "Incorrect CIBIL PDF password. Please re-check and try again."
                             : "CIBIL PDF is password-protected. Please enter the PDF password and re-upload.",
                         "PDF_PASSWORD");
-                throw new BsaException("This PDF is password-protected. Please upload an unlocked statement PDF or export CSV/XLSX.", "PDF_PASSWORD");
+                throw new BsaException(
+                    supplied
+                        ? "Incorrect bank statement PDF password. Please re-check the password and try again."
+                        : "This bank statement PDF is password-protected. Please enter the PDF password and re-upload (or export CSV/XLSX from netbanking).",
+                    "PDF_PASSWORD");
             }
             throw new BsaException($"PDF parsing failed: {msg}", "PDF_FAILED");
         }
@@ -128,16 +168,113 @@ public static class BsaStatementParser
     private static readonly Regex DateRegex =
         new(@"\b(\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{2,4}|\d{2}[-/][A-Za-z]{3}[-/]\d{2,4}|\d{2}\s+[A-Za-z]{3}\s+\d{2,4}|\d{2}[A-Za-z]{3}\d{2,4})\b", RegexOptions.Compiled);
 
+    // ── State Bank (SBI) "DETAILED STATEMENT" layout ────────────────
+    //
+    // This PDF is a table whose cells are emitted as a single unbroken run of
+    // whitespace-separated words — often one enormous line per page, and only
+    // 109 lines for 109 pages. There is no per-row line to anchor on, so the
+    // row-at-a-time parser below sees one enormous "row" per page, produces a
+    // handful of transactions, and ends up with dozens of real transactions
+    // merged into each one.
+    //
+    // The only stable anchor in that stream is the column signature every row
+    // carries:  <date> <date> <narrative…> <withdrawal> <deposit> <balance>
+    // Withdrawal/deposit are printed as 0.00 when they don't apply, so all
+    // three amounts are always present. A row's narrative may also continue
+    // AFTER its balance, which we re-attach to the row that owns it.
+
+    private static readonly Regex SbiRowRe = new(
+        @"(?<d1>\d{2}[-/]\d{2}[-/]\d{2,4})\s+(?<d2>\d{2}[-/]\d{2}[-/]\d{2,4})\s+" +
+        @"(?<desc>.*?)\s+" +
+        @"(?<w>[\d,]+\.\d{2})\s+(?<dep>[\d,]+\.\d{2})\s+(?<bal>[\d,]+\.\d{2})",
+        RegexOptions.Singleline | RegexOptions.Compiled);
+
+    /// <summary>Does this look like the SBI detailed-statement layout?</summary>
+    private static bool LooksLikeSbiStatement(string text) =>
+        text.Contains("Balance(INR)", StringComparison.OrdinalIgnoreCase)
+        && text.Contains("Transaction Remarks", StringComparison.OrdinalIgnoreCase)
+        && text.Contains("Value Date", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parse the SBI streaming layout. Returns an empty list (rather than
+    /// throwing) when the document doesn't match, so the caller can fall back
+    /// to the normal parser.
+    /// </summary>
+    private static List<BsaTransaction> ParseSbiStatement(string text)
+    {
+        var result = new List<BsaTransaction>();
+        var matches = SbiRowRe.Matches(text);
+        if (matches.Count == 0) return result;
+
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var m = matches[i];
+
+            var desc = Regex.Replace(m.Groups["desc"].Value, @"\s{2,}", " ").Trim();
+
+            // A narrative that spills past its own balance sits between this row's
+            // balance and the next row's first date. It is preceded by the running
+            // serial number ("Of 1 I/545…"), which belongs to neither — drop it.
+            var tailStart = m.Index + m.Length;
+            var tailEnd = i + 1 < matches.Count ? matches[i + 1].Index : text.Length;
+            if (tailEnd > tailStart)
+            {
+                var tail = text[tailStart..tailEnd];
+                tail = Regex.Replace(tail, @"^\s*(?:of\s+)?\d{1,7}\s+", " ", RegexOptions.IgnoreCase);
+                tail = Regex.Replace(tail, @"\s{2,}", " ").Trim();
+                // The remainder is continuation of THIS row's narrative.
+                if (tail.Length > 0 && tail.Length <= 200) desc = (desc + " " + tail).Trim();
+            }
+
+            if (desc.Length == 0) continue;
+
+            decimal Parse(string g) => BsaAnalyzer.ParseAmount(m.Groups[g].Value);
+            var withdrawal = Parse("w");
+            var deposit = Parse("dep");
+            var balance = Parse("bal");
+
+            // Value date is the first column, transaction date the second. Prefer the
+            // transaction date (it is what the customer actually transacted on) and
+            // fall back to the value date.
+            var dateText = BsaAnalyzer.ParseDate(m.Groups["d2"].Value);
+            if (string.IsNullOrWhiteSpace(dateText))
+                dateText = BsaAnalyzer.ParseDate(m.Groups["d1"].Value);
+            if (string.IsNullOrWhiteSpace(dateText)) continue;
+
+            result.Add(new BsaTransaction
+            {
+                Date = dateText,
+                Description = desc,
+                Debit = withdrawal,
+                Credit = deposit,
+                Balance = balance,
+                Raw = m.Value,
+                SourceType = "text",
+                SourceExcerpt = desc,
+                PendingBalance = false,
+            });
+        }
+
+        return result;
+    }
+
     public static List<BsaTransaction> ParseText(string text)
     {
         var lines = text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
         var transactions = new List<BsaTransaction>();
+
 
         var headerLineIdx = -1;
         for (var i = 0; i < Math.Min(lines.Count, 30); i++)
         {
             if (HeaderHits(lines[i]) >= 3) { headerLineIdx = i; break; }
         }
+
+        var header = headerLineIdx >= 0 ? lines[headerLineIdx] : "";
+        var debitColumn = Regex.Match(header, @"\b(withdrawal|debit|dr)\b", RegexOptions.IgnoreCase);
+        var creditColumn = Regex.Match(header, @"\b(deposit|credit|cr)\b", RegexOptions.IgnoreCase);
+        var explicitAmountColumns = debitColumn.Success && creditColumn.Success &&
+            Regex.IsMatch(header, @"\bbalance\b", RegexOptions.IgnoreCase);
 
         BsaTransaction? currentTx = null;
 
@@ -178,7 +315,16 @@ public static class BsaStatementParser
                 decimal debit = 0, credit = 0, balance = 0;
                 var pendingBalance = false;
 
-                if (amounts.Count >= 2)
+                if (explicitAmountColumns && amounts.Count >= 3)
+                {
+                    // A Debit/Credit/Balance table prints zero in the unused column.
+                    // Reading only the penultimate amount loses debit rows and the
+                    // first salary credit when there is no previous balance.
+                    balance = amounts[^1].Value;
+                    debit = amounts[debitColumn.Index < creditColumn.Index ? ^3 : ^2].Value;
+                    credit = amounts[debitColumn.Index < creditColumn.Index ? ^2 : ^3].Value;
+                }
+                else if (amounts.Count >= 2)
                 {
                     balance = amounts[^1].Value;
                     var txAmt = amounts[^2];
@@ -418,7 +564,7 @@ public static class BsaStatementParser
             if (tx.Date.Length > 0 && (tx.Debit > 0 || tx.Credit > 0))
             {
                 tx.SourceType = "csv";
-                tx.SourceRow = i + 2;
+                tx.SourceRow = i + 1;
                 tx.SourceExcerpt = string.Join("|", cells);
                 rows.Add(tx);
             }

@@ -11,6 +11,7 @@ import EmployeeMasterPage from './pages/EmployeeMasterPage';
 import CompanyCategoryPage from './pages/CompanyCategoryPage';
 import OcrPage from './pages/OcrPage';
 import BsaAnalyzerPage from './pages/BsaAnalyzerPage';
+import FinancialAnalysisPage from './pages/FinancialAnalysisPage';
 import LeadMasterPage from './pages/LeadMasterPage';
 import RoleMasterPage from './pages/RoleMasterPage';
 import ReportsPage from './pages/ReportsPage';
@@ -20,6 +21,9 @@ import LimitRequestsPage from './pages/LimitRequestsPage';
 import MenuMasterPage from './pages/MenuMasterPage';
 import AccessControlPage from './pages/AccessControlPage';
 import SettingsPage from './pages/SettingsPage';
+import TopProgressBar from './components/TopProgressBar';
+import ToastStack from './components/ToastStack';
+import ConfirmDialog from './components/ConfirmDialog';
 
 export default function App() {
   // SSO hand-off from the legacy CIPPortal: exchange ?sso={ticket} for a JWT on boot.
@@ -32,6 +36,11 @@ export default function App() {
 
   return (
     <BrowserRouter basename={(import.meta as any).env?.VITE_BASE || '/'}>
+      {/* Global feedback layer. Mounted above the router so the progress bar also
+          covers the login screen, which renders outside the Layout shell. */}
+      <TopProgressBar />
+      <ToastStack />
+      <ConfirmDialog />
       <Routes>
         <Route
           path="/login"
@@ -52,6 +61,7 @@ export default function App() {
           <Route path="company-categories" element={<CompanyCategoryPage />} />
           <Route path="ocr" element={<OcrPage />} />
           <Route path="bsa-analyzer" element={<BsaAnalyzerPage />} />
+          <Route path="financial-analysis" element={<FinancialAnalysisPage />} />
           <Route path="lead-master" element={<LeadMasterPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="generic-reports" element={<GenericReportsPage />} />

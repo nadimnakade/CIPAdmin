@@ -72,6 +72,32 @@ public class UpdateEmployeeRequest
     public int? LocationId { get; set; }
     public string? Doj { get; set; }
     public string? Contact { get; set; }
+
+    // ---- extended master fields (aligned with the reference Employee Master modal).
+    // Every one of these is optional and NULL when the client omits it, so an older
+    // client that only sends the six fields above keeps working unchanged.
+    public int? EmpNo { get; set; }
+    public string? Username { get; set; }
+    /// <summary>Write-only. A new password is stored only when this is non-empty;
+    /// the stored value is never returned to any client.</summary>
+    public string? Password { get; set; }
+    public int? RoleId { get; set; }
+    public decimal? Salary { get; set; }
+    public int? BossCode { get; set; }
+    public int? ReportingManagerId { get; set; }
+    public string? Dob { get; set; }
+    public string? Address { get; set; }
+    public string? MobileNo2 { get; set; }
+    public int? ProductKey { get; set; }
+    public string? BankAccountNo { get; set; }
+    public string? IfscCode { get; set; }
+    public string? BankName { get; set; }
+    public string? BankAccName { get; set; }
+    public string? PanNo { get; set; }
+    public string? AadharNo { get; set; }
+    public string? EmployeeType { get; set; }
+    public string? Category { get; set; }
+    public string? OfficeContact { get; set; }
 }
 
 public class UpdateEmployeeStatusRequest
@@ -341,6 +367,104 @@ public class EmployeesController : ControllerBase
         return Ok(dt.AsEnumerable().Select(r => new { id = r.Field<int>("LOC_ID"), name = r["LOC_NAME"].ToString() }));
     }
 
+    /// <summary>Roles for the Employee Master edit modal dropdown (active roles only).</summary>
+    [HttpGet("roles")]
+    public async Task<ActionResult<object>> GetRoles()
+    {
+        var dt = await _db.QueryAsync(
+            "SELECT ROLE_ID, LTRIM(RTRIM(ROLE_NAME)) AS ROLE_NAME FROM dbo.TBL_CIP_ROLE_MASTER WHERE ISNULL(ROLE_ACTIVE,1) = 1 ORDER BY ROLE_ID");
+        return Ok(dt.AsEnumerable().Select(r => new { id = r.Field<int>("ROLE_ID"), name = r["ROLE_NAME"].ToString() }));
+    }
+
+    /// <summary>
+    /// Full employee record for the edit modal. Kept separate from the paged listing so the
+    /// 10k-row grid query stays narrow.
+    ///
+    /// PASSWORD is deliberately NOT selected. The reference project returns it (its stored
+    /// procedure maps PASSWORD AS [Password]), which exposes every credential hash to anyone
+    /// who can open the modal; the field here is write-only — set it to change, leave it
+    /// blank to keep the current one.
+    /// </summary>
+    [HttpGet("{empCode:int}/detail")]
+    public async Task<ActionResult<object>> GetDetail(int empCode)
+    {
+        if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode))
+            return StatusCode(403, new { error = "This employee is outside your team's scope." });
+
+        var dt = await _db.QueryAsync(@"
+            SELECT e.EMP_CODE, e.EMP_NO, LTRIM(RTRIM(e.EMP_NAME)) AS EMP_NAME, e.USERNAME,
+                   e.DESIG_ID, e.ROLE_ID, e.LOCATION_ID, e.EMAIL_ID,
+                   e.DOJ, e.DOB, e.SALARY, e.EMP_ADDRESS, e.PERSONAL_CONTACT1, e.PERSONAL_CONTACT2,
+                   e.OFFICE_CONTACT, e.SALARY_AC_NO, e.BANK_IFSC_CODE, e.BANK_NAME, e.BANK_ACC_NAME,
+                   e.PAN_NO, e.AADHAR_NO, e.USER_TYPE, e.CATEGORY,
+                   e.BOSS_CODE, e.REPORTING_MANAGER_ID, e.PRODUCT_KEY, e.ACTIVE,
+                   e.REFFERED_BY, e.REFERRED_BY_CODE, e.COMPANY, e.CITY, e.LANG_SPOKEN, e.OCCUPATION,
+                   dn.DESIG_NAME, r.ROLE_NAME, l.LOC_NAME
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
+            LEFT JOIN dbo.TBL_CIP_ROLE_MASTER r ON r.ROLE_ID = e.ROLE_ID
+            LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
+            WHERE e.EMP_CODE = @e AND ISNULL(e.IS_DELETED,0) = 0", p => p.AddWithValue("@e", empCode));
+
+        if (dt.Rows.Count == 0) return NotFound(new { error = "Employee not found." });
+        var r = dt.Rows[0];
+
+        string? S(string col) => Clean(r[col]);
+
+        // Roughly half the employee rows were imported with the literal text "undefined"
+        // in the bank/contact columns. Surfacing it would both look broken and, because the
+        // modal saves what it displays, write the junk straight back. Treat it as empty.
+        static string? Clean(object v)
+        {
+            if (v == DBNull.Value) return null;
+            var s = v.ToString();
+            return string.IsNullOrWhiteSpace(s) || s.Equals("undefined", StringComparison.OrdinalIgnoreCase) ? null : s;
+        }
+
+        int? I(string col) => r[col] == DBNull.Value ? null : Convert.ToInt32(r[col]);
+        decimal? D(string col) => r[col] == DBNull.Value ? null : Convert.ToDecimal(r[col]);
+
+        return Ok(new
+        {
+            empCode = r.Field<int>("EMP_CODE"),
+            empNo = I("EMP_NO"),
+            employeeName = S("EMP_NAME"),
+            username = S("USERNAME"),
+            designationId = I("DESIG_ID"),
+            designation = S("DESIG_NAME"),
+            roleId = I("ROLE_ID"),
+            roleName = S("ROLE_NAME"),
+            locationId = I("LOCATION_ID"),
+            location = S("LOC_NAME"),
+            email = S("EMAIL_ID"),
+            doj = S("DOJ"),
+            dob = S("DOB"),
+            salary = D("SALARY"),
+            address = S("EMP_ADDRESS"),
+            mobileNo1 = S("PERSONAL_CONTACT1"),
+            mobileNo2 = S("PERSONAL_CONTACT2"),
+            officeContact = S("OFFICE_CONTACT"),
+            bankAccountNo = S("SALARY_AC_NO"),
+            ifscCode = S("BANK_IFSC_CODE"),
+            bankName = S("BANK_NAME"),
+            bankAccName = S("BANK_ACC_NAME"),
+            panNo = S("PAN_NO"),
+            aadharNo = S("AADHAR_NO"),
+            employeeType = S("USER_TYPE"),
+            category = S("CATEGORY"),
+            bossCode = I("BOSS_CODE"),
+            reportingManagerId = I("REPORTING_MANAGER_ID"),
+            productKey = I("PRODUCT_KEY"),
+            referredBy = S("REFFERED_BY"),
+            referredByCode = S("REFERRED_BY_CODE"),
+            company = S("COMPANY"),
+            city = S("CITY"),
+            langSpoken = S("LANG_SPOKEN"),
+            occupation = I("OCCUPATION"),
+            isActive = r["ACTIVE"] != DBNull.Value && Convert.ToBoolean(r["ACTIVE"])
+        });
+    }
+
     /// <summary>Update an employee's master data (name, designation, email, location, DOJ, contact).</summary>
     [HttpPut("{empCode:int}")]
     public async Task<IActionResult> UpdateEmployee(int empCode, [FromBody] UpdateEmployeeRequest req)
@@ -351,6 +475,30 @@ public class EmployeesController : ControllerBase
             return BadRequest(new { error = "Employee name is required." });
         if (!string.IsNullOrWhiteSpace(req.Email) && !System.Text.RegularExpressions.Regex.IsMatch(req.Email.Trim(), @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
             return BadRequest(new { error = "Email format is invalid." });
+
+        // Aadhar is CHAR(12) in the schema: anything else would be silently truncated by SQL
+        // Server, which would store a value the user never typed.
+        if (!string.IsNullOrWhiteSpace(req.AadharNo) && !System.Text.RegularExpressions.Regex.IsMatch(req.AadharNo.Trim(), @"^\d{12}$"))
+            return BadRequest(new { error = "Aadhar number must be exactly 12 digits." });
+        if (!string.IsNullOrWhiteSpace(req.PanNo) && !System.Text.RegularExpressions.Regex.IsMatch(req.PanNo.Trim(), @"^[A-Za-z]{5}\d{4}[A-Za-z]$"))
+            return BadRequest(new { error = "PAN must be in the format ABCDE1234F." });
+        if (req.Salary is < 0)
+            return BadRequest(new { error = "Salary cannot be negative." });
+
+        // An employee cannot report to themselves, and reporting to the edited employee would
+        // create a cycle that breaks hierarchy scoping for the whole subtree.
+        if (req.ReportingManagerId == empCode)
+            return BadRequest(new { error = "An employee cannot be their own reporting manager." });
+        if (req.ReportingManagerId is > 0)
+        {
+            var reportsToSelf = await _db.ScalarAsync(@"
+                SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER
+                WHERE EMP_CODE = @mgr AND (REPORTING_MANAGER_ID = @e OR @e IN (
+                        SELECT REPORTING_MANAGER_ID FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE REPORTING_MANAGER_ID = @mgr))",
+                p => { p.AddWithValue("@mgr", req.ReportingManagerId.Value); p.AddWithValue("@e", empCode); });
+            if (Convert.ToInt32(reportsToSelf) > 0)
+                return BadRequest(new { error = "That reporting manager sits under this employee — it would create a circular hierarchy." });
+        }
 
         var exists = await _db.ScalarAsync(
             "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
@@ -365,6 +513,27 @@ public class EmployeesController : ControllerBase
                 LOCATION_ID = @loc,
                 DOJ = @doj,
                 PERSONAL_CONTACT1 = NULLIF(LTRIM(RTRIM(@c)), ''),
+                -- extended master fields: each is only written when the client sent it, so an
+                -- older client (or a partial save) cannot silently blank a column.
+                EMP_NO = COALESCE(@empNo, EMP_NO),
+                USERNAME = CASE WHEN @usernameSet = 1 THEN NULLIF(LTRIM(RTRIM(@username)), '') ELSE USERNAME END,
+                ROLE_ID = COALESCE(@roleId, ROLE_ID),
+                SALARY = COALESCE(@salary, SALARY),
+                BOSS_CODE = COALESCE(@boss, BOSS_CODE),
+                REPORTING_MANAGER_ID = COALESCE(@rm, REPORTING_MANAGER_ID),
+                DOB = CASE WHEN @dobSet = 1 THEN NULLIF(LTRIM(RTRIM(@dob)), '') ELSE DOB END,
+                EMP_ADDRESS = CASE WHEN @addrSet = 1 THEN NULLIF(LTRIM(RTRIM(@addr)), '') ELSE EMP_ADDRESS END,
+                PERSONAL_CONTACT2 = CASE WHEN @mob2Set = 1 THEN NULLIF(LTRIM(RTRIM(@mob2)), '') ELSE PERSONAL_CONTACT2 END,
+                OFFICE_CONTACT = CASE WHEN @offSet = 1 THEN NULLIF(LTRIM(RTRIM(@off)), '') ELSE OFFICE_CONTACT END,
+                SALARY_AC_NO = CASE WHEN @bacSet = 1 THEN NULLIF(LTRIM(RTRIM(@bac)), '') ELSE SALARY_AC_NO END,
+                BANK_IFSC_CODE = CASE WHEN @ifscSet = 1 THEN NULLIF(LTRIM(RTRIM(@ifsc)), '') ELSE BANK_IFSC_CODE END,
+                BANK_NAME = CASE WHEN @bnameSet = 1 THEN NULLIF(LTRIM(RTRIM(@bname)), '') ELSE BANK_NAME END,
+                BANK_ACC_NAME = CASE WHEN @baccSet = 1 THEN NULLIF(LTRIM(RTRIM(@bacc)), '') ELSE BANK_ACC_NAME END,
+                PAN_NO = CASE WHEN @panSet = 1 THEN NULLIF(LTRIM(RTRIM(@pan)), '') ELSE PAN_NO END,
+                AADHAR_NO = CASE WHEN @aadhaarSet = 1 THEN NULLIF(LTRIM(RTRIM(@aadhaar)), '') ELSE AADHAR_NO END,
+                USER_TYPE = CASE WHEN @etypeSet = 1 THEN NULLIF(LTRIM(RTRIM(@etype)), '') ELSE USER_TYPE END,
+                CATEGORY = CASE WHEN @catSet = 1 THEN NULLIF(LTRIM(RTRIM(@cat)), '') ELSE CATEGORY END,
+                PRODUCT_KEY = COALESCE(@pkey, PRODUCT_KEY),
                 MODIFIED_BY = @by,
                 MODIFIED_DATE = GETDATE()
             WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
@@ -378,8 +547,62 @@ public class EmployeesController : ControllerBase
             p.AddWithValue("@c", (object?)req.Contact?.Trim() ?? DBNull.Value);
             p.AddWithValue("@by", GetEmpCode());
             p.AddWithValue("@e", empCode);
+
+            // "Set" flags distinguish "the client sent an empty string, so clear this column"
+            // from "the client never mentioned this column, so leave it alone". Without them,
+            // a partial save would erase every field it did not carry.
+            void Flag(string name, bool set) => p.AddWithValue(name, set ? 1 : 0);
+            void Text(string name, string? value)
+            {
+                // Normalise the legacy "undefined" placeholder to NULL on the way in as well,
+                // so a save can never reintroduce it.
+                var v = value?.Trim();
+                if (string.IsNullOrWhiteSpace(v) || v.Equals("undefined", StringComparison.OrdinalIgnoreCase))
+                    v = null;
+                p.AddWithValue(name, (object?)v ?? DBNull.Value);
+            }
+
+            p.AddWithValue("@empNo", req.EmpNo ?? (object)DBNull.Value);
+            p.AddWithValue("@roleId", req.RoleId ?? (object)DBNull.Value);
+            p.AddWithValue("@salary", req.Salary ?? (object)DBNull.Value);
+            p.AddWithValue("@boss", req.BossCode ?? (object)DBNull.Value);
+            p.AddWithValue("@rm", req.ReportingManagerId ?? (object)DBNull.Value);
+            p.AddWithValue("@pkey", req.ProductKey ?? (object)DBNull.Value);
+
+            Flag("@usernameSet", req.Username != null); Text("@username", req.Username);
+            Flag("@dobSet", req.Dob != null); Text("@dob", req.Dob);
+            Flag("@addrSet", req.Address != null); Text("@addr", req.Address);
+            Flag("@mob2Set", req.MobileNo2 != null); Text("@mob2", req.MobileNo2);
+            Flag("@offSet", req.OfficeContact != null); Text("@off", req.OfficeContact);
+            Flag("@bacSet", req.BankAccountNo != null); Text("@bac", req.BankAccountNo);
+            Flag("@ifscSet", req.IfscCode != null); Text("@ifsc", req.IfscCode);
+            Flag("@bnameSet", req.BankName != null); Text("@bname", req.BankName);
+            Flag("@baccSet", req.BankAccName != null); Text("@bacc", req.BankAccName);
+            Flag("@panSet", req.PanNo != null); Text("@pan", req.PanNo);
+            Flag("@aadhaarSet", req.AadharNo != null); Text("@aadhaar", req.AadharNo);
+            Flag("@etypeSet", req.EmployeeType != null); Text("@etype", req.EmployeeType);
+            Flag("@catSet", req.Category != null); Text("@cat", req.Category);
         });
         if (affected == 0) return NotFound(new { error = "Employee not found." });
+
+        // Password is handled separately and only when supplied: it is never read back, and
+        // a blank field must mean "leave the existing password alone", not "set it to empty".
+        if (!string.IsNullOrEmpty(req.Password))
+        {
+            if (req.Password.Length < 6)
+                return BadRequest(new { error = "Password must be at least 6 characters." });
+            if (req.Password.Length > 100)
+                return BadRequest(new { error = "Password exceeds 100 characters." });
+
+            await _db.ExecuteAsync(
+                "UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER SET PASSWORD = @pw, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE() WHERE EMP_CODE = @e",
+                p =>
+                {
+                    p.AddWithValue("@pw", req.Password);
+                    p.AddWithValue("@by", GetEmpCode());
+                    p.AddWithValue("@e", empCode);
+                });
+        }
 
         _logger.LogInformation("Employee {EmpCode} updated by {User}", empCode, GetEmpCode());
         return Ok(new { ok = true });

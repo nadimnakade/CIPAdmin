@@ -19,9 +19,113 @@ public class BsaController : ControllerBase
     private const long MaxBytes = 25 * 1024 * 1024; // 25 MB (matches Node server limit)
     private static readonly string[] StatementExt = { ".pdf", ".csv", ".xlsx", ".xls", ".txt" };
 
-    [HttpPost("analyze")]
+    /// <summary>
+    /// Financial Analysis — accepts a bank statement, a CIBIL report, or both.
+    ///
+    /// This is a SEPARATE endpoint from POST /api/bsa/analyze on purpose: the
+    /// original requires a bank statement and is left exactly as it was so the
+    /// existing CIBIL Analyzer screen keeps working unchanged. Here either file
+    /// may be omitted, but at least one must be supplied.
+    ///
+    /// With no bank statement the transaction-derived sections are simply empty —
+    /// the CIBIL, eligibility and underwriting tabs still populate.
+    /// </summary>
+    [HttpPost("analyze-flex")]
     [RequestSizeLimit(MaxBytes)]
-    public IActionResult Analyze(IFormFile statement, IFormFile? cibil = null, string? cibilPassword = null)
+    // NOTE: on an [ApiController] a plain `string?` parameter binds from the QUERY
+    // string, not from the multipart form. These must therefore be marked
+    // [FromForm] or an uploaded password is silently discarded — which is exactly
+    // what was happening to cibilPassword before this was found.
+    public IActionResult AnalyzeEither(
+        [FromForm(Name = "statement")] IFormFile? statement = null,
+        [FromForm(Name = "cibil")] IFormFile? cibil = null,
+        [FromForm(Name = "cibilPassword")] string? cibilPassword = null,
+        [FromForm(Name = "statementPassword")] string? statementPassword = null)
+    {
+        var hasStatement = statement is { Length: > 0 };
+        var hasCibil = cibil is { Length: > 0 };
+        if (!hasStatement && !hasCibil)
+            return BadRequest(new { error = "Upload a bank statement, a CIBIL report, or both." });
+
+        try
+        {
+            var transactions = new List<BsaTransaction>();
+            if (hasStatement)
+            {
+                if (statement!.Length > MaxBytes)
+                    return BadRequest(new { error = "Statement file exceeds the 25 MB limit." });
+                var ext = Path.GetExtension(statement.FileName).ToLowerInvariant();
+                if (!StatementExt.Contains(ext))
+                    return BadRequest(new { error = $"Only {string.Join(", ", StatementExt)} files are allowed" });
+
+                using var ms = new MemoryStream();
+                statement.CopyTo(ms);
+                transactions = BsaStatementParser.ParseFile(ms.ToArray(), statement.FileName, statementPassword);
+            }
+
+            // An empty statement set still analyses cleanly — it just yields zeros
+            // and empty category lists rather than throwing.
+            var analysis = BsaAnalyzer.AnalyzeTransactions(transactions);
+
+            if (!hasCibil)
+            {
+                return Ok(new
+                {
+                    success = true,
+                    filename = statement!.FileName,
+                    transactionCount = transactions.Count,
+                    statementProvided = true,
+                    cibilProvided = false,
+                    analysis,
+                });
+            }
+
+            var cibilExt = Path.GetExtension(cibil!.FileName).ToLowerInvariant();
+            if (cibilExt != ".pdf" && cibilExt != ".txt")
+                return BadRequest(new { error = "CIBIL report must be a PDF or TXT file" });
+            if (cibil.Length > MaxBytes)
+                return BadRequest(new { error = "CIBIL file exceeds the 25 MB limit." });
+
+            using var cms = new MemoryStream();
+            cibil.CopyTo(cms);
+            var cibilBytes = cms.ToArray();
+
+            var cibilText = cibilExt == ".txt"
+                ? System.Text.Encoding.UTF8.GetString(cibilBytes)
+                : BsaStatementParser.ExtractPdfText(cibilBytes, cibilPassword, isCibil: true);
+
+            var report = BsaAnalyzer.ParseCibilText(cibilText);
+
+            return Ok(new
+            {
+                success = true,
+                filename = hasStatement ? statement!.FileName : cibil.FileName,
+                transactionCount = transactions.Count,
+                statementProvided = hasStatement,
+                cibilProvided = true,
+                analysis,
+                cibil = report,
+                crossVerify = BsaAnalyzer.CrossVerifyCibil(analysis, report),
+                eligibility = BsaAnalyzer.AssessEligibility(analysis, report),
+                underwriting = BsaAnalyzer.AssessUnderwriting(analysis, report),
+            });
+        }
+        catch (BsaStatementParser.BsaException bex)
+        {
+            return BadRequest(new { error = bex.Message, errorCode = bex.Code });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = "Analysis failed: " + ex.Message });
+        }
+    }
+
+    [HttpPost("analyze")]
+    [RequestSizeLimit(MaxBytes)]public IActionResult Analyze(
+        [FromForm(Name = "statement")] IFormFile statement,
+        [FromForm(Name = "cibil")] IFormFile? cibil = null,
+        [FromForm(Name = "cibilPassword")] string? cibilPassword = null,
+        [FromForm(Name = "statementPassword")] string? statementPassword = null)
     {
         if (statement == null || statement.Length == 0)
             return BadRequest(new { error = "No statement file uploaded" });
@@ -38,7 +142,7 @@ public class BsaController : ControllerBase
             statement.CopyTo(ms);
             var bytes = ms.ToArray();
 
-            var transactions = BsaStatementParser.ParseFile(bytes, statement.FileName);
+            var transactions = BsaStatementParser.ParseFile(bytes, statement.FileName, statementPassword);
             if (transactions.Count == 0)
                 return BadRequest(new
                 {

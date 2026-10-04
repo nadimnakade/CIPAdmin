@@ -5,6 +5,8 @@ import {
 } from 'recharts';
 import { api, ApiError, isAdminUser } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 
 interface DashboardData {
   cibilPulledToday: number;
@@ -266,13 +268,20 @@ function DialerUsersModal({ group, onClose }: { group: 'old' | 'new' | 'all'; on
   }, [group, search, page]);
 
   const move = async (r: DialerUserRow) => {
-    const verb = r.isNewDialer ? 'move back to the OLD dialer' : 'move to the NEW dialer';
-    if (!confirm(`${verb}: ${r.empName || r.empCode}?`)) return;
+    const toNew = !r.isNewDialer;
+    const name = r.empName || String(r.empCode);
+    const ok = await confirmAction({
+      title: `Move ${name}?`,
+      text: `${name} will be moved to the ${toNew ? 'NEW' : 'OLD'} dialer.`,
+      confirmText: 'Move',
+    });
+    if (!ok) return;
     setBusy(r.empCode);
     try {
       await api.put(`/api/dashboard/dialer-users/${r.empCode}`, {
-        dialerVersion: r.isNewDialer ? null : '0.0.23',
+        dialerVersion: toNew ? '0.0.23' : null,
       });
+      toast.success(`${name} moved to the ${toNew ? 'NEW' : 'OLD'} dialer.`);
       // Refresh the current page.
       const params = new URLSearchParams({ group, page: String(page), pageSize: String(pageSize) });
       if (search) params.set('search', search);

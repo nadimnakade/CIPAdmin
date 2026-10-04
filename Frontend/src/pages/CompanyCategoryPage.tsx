@@ -1,6 +1,9 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, ApiError, getToken, apiUrl } from '../api';
 import Icon from '../components/Icon';
+import { trackedFetch } from '../lib/loading';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager, SortArrow } from '../components/tableView';
 
 interface Row {
@@ -77,9 +80,16 @@ export default function CompanyCategoryPage() {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
 
   const remove = async (r: Row) => {
-    if (!confirm(`Delete "${r.name}" (${r.category})? This removes the selected row permanently.`)) return;
+    const ok = await confirmAction({
+      title: `Delete "${r.name}"?`,
+      text: `Category: ${r.category}. The selected row is removed permanently.`,
+      confirmText: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.delete('/api/company-categories/' + r.key);
+      toast.success(`Deleted "${r.name}".`);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Delete failed');
@@ -192,7 +202,7 @@ export default function CompanyCategoryPage() {
           products={products}
           banks={banks}
           onClose={() => setShowUpload(false)}
-          onSaved={(msg) => { setShowUpload(false); setError(''); alert(msg); load(); }}
+          onSaved={(msg) => { setShowUpload(false); setError(''); toast.success(msg); load(); }}
         />
       )}
       {editRow && (
@@ -229,7 +239,7 @@ function UploadModal({
       fd.append('file', file);
       fd.append('productId', productId);
       fd.append('bankId', bankId);
-      const res = await fetch(apiUrl('/api/company-categories/upload'), {
+      const res = await trackedFetch(apiUrl('/api/company-categories/upload'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
         body: fd,

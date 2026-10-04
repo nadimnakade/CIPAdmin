@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 
 interface OcrExtractResponse {
   jobId: number;
@@ -190,14 +192,20 @@ export default function OcrPage() {
   };
 
   const deleteJob = async (job: OcrJob) => {
-    if (!confirm(`Delete the conversion of “${job.originalFileName}” from history?`)) return;
+    const ok = await confirmAction({
+      title: 'Delete this conversion?',
+      text: `“${job.originalFileName}” is removed from the conversion history.`,
+      confirmText: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.delete(`/api/ocr/jobs/${job.jobId}`);
       if (result?.jobId === job.jobId) {
         setResult(null);
         setGrid([]);
       }
-      setNotice('Conversion deleted.');
+      toast.success('Conversion deleted.');
       loadHistory();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Delete failed');

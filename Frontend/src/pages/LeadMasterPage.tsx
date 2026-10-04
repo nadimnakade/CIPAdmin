@@ -1,6 +1,8 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager, SortArrow } from '../components/tableView';
 
 interface Row {
@@ -77,9 +79,16 @@ export default function LeadMasterPage() {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
 
   const remove = async (r: Row) => {
-    if (!confirm(`Delete lead "${r.leadName}"? It is closed out of the list (status set to deleted) and never shows here again.`)) return;
+    const ok = await confirmAction({
+      title: `Delete lead "${r.leadName}"?`,
+      text: 'The lead is closed out of the list (status set to deleted) and never shows here again.',
+      confirmText: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.delete('/api/leads/' + r.leadId);
+      toast.success(`Lead "${r.leadName}" deleted.`);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Delete failed');

@@ -79,14 +79,6 @@ public static partial class BsaAnalyzer
         new(Rx(@"\bFINO\b"), "Fino Payments Bank", "PB"),
     };
 
-    // ── SALARY KEYWORDS ─────────────────────────────────────────────
-    private static readonly string[] SalaryKeywords =
-    {
-        "SALARY", "PAYROLL", "WAGES", "STIPEND", "BONUS", "INCENTIVE",
-        "SAL/", @"SAL ", @"NEFT.*SALARY", @"IMPS.*SALARY", @"RTGS.*SALARY",
-        @"NACH.*SALARY", @"NACH.*PAYROLL",
-    };
-
     private static readonly Dictionary<string, string> SalarySourceMap = new()
     {
         ["AI AIRPORT"] = "AI Airport Services Ltd", ["AIAIRPORT"] = "AI Airport Services Ltd",
@@ -167,10 +159,116 @@ public static partial class BsaAnalyzer
         new(Rx(@"MUTUAL.*FUND|MF.*SIP|SIP.*MF"), "Mutual Fund"),
     };
 
+    // ── SECURITIES RAILS (demat / RTA / depository / portfolio) ────
+    // These are the institutions that MOVE securities value in and out of a bank
+    // account. Matching them is what separates "I hold investments" from "I pay a
+    // loan EMI" — a CAMS debit is a mutual-fund purchase, not a loan repayment.
+    private sealed record SecurityRail(Regex Regex, string Platform);
+    private static readonly SecurityRail[] SecurityRailPatterns =
+    {
+        new(Rx(@"\bDPID\b|DEMAT(?!.*(CHARG|FEE))"), "NSDL / CDSL Demat"),
+        new(Rx(@"\bCDSL\b"), "CDSL"),
+        new(Rx(@"\bNSDL\b"), "NSDL"),
+        new(Rx(@"\bCAMS\b|CAMSONLINE|MFUTILITY|MF\s*UTILITY"), "CAMS (RTA)"),
+        new(Rx(@"\bKFIN\b|KFINETECH"), "KFin Technologies"),
+        new(Rx(@"\bKARVY\b|KRVY"), "Karvy / KFin"),
+        new(Rx(@"\bFTAMIL\b|FTAMILONLINE"), "Franklin Templeton Mutual Fund"),
+        new(Rx(@"\bNSE\b|\bBSE\b|NSE Clearing|BSE Clearing"), "NSE / BSE Clearing"),
+        new(Rx(@"\bAMFI\b"), "AMFI"),
+        // BillDesk/aggregator SIPs appear as "ACH/BD- FTMF/..." or "ACH/BD- Sundaram MF/..."
+        // naming no RTA. These require a fund word alongside the "BD-" prefix: a bare
+        // "BD-" also prefixes genuine LOANS ("BD- IndusindBankLoan"), which must stay EMIs.
+        new(Rx(@"\bBD-\s*[^/]{0,24}\b(MF|MUTF|MUTUAL|FUND|SIP|UNITS?)\b"), "BillDesk (aggregator) SIP"),
+        new(Rx(@"\bRTA\b|REGISTRAR.*(MF|FUND)|TRANSFER\s*AGENT"), "RTA"),
+        new(Rx(@"\bDP\b.*CHARGE|DEMAT.*CHARGE|DP.*CHARGE"), "Demat (charges)"),
+        new(Rx(@"\bDEMAT.*(RECEIPT|ACCOUNT|SERV|\d{16})"), "Demat Account"),
+        new(Rx(@"\bSEBI\b"), "SEBI"),
+        new(Rx(@"\bMUTUAL\s*FUND\s*(UNITS?|INVEST|PURCHASE)"), "Mutual Fund"),
+        // NB: do not add a bare "\bCP\b" here for commercial paper / "closing price".
+        // It matches the "cp." in ordinary UPI handles (e.g. "UPI/cp.zepto13a87@a"),
+        // which filed 29 grocery UPI payments as Bonds/FD on a real statement.
+        new(Rx(@"\bBOND\b|\bG-SEC\b|\bGOVT\s*SEC|\bNCD\b|\bTREASURY\s*BILL|\bFD\b.*(INVEST|PURCHASE)|\bFIXED\s*DEPOSIT|RECURRING\s*DEPOSIT|\bRD\b.*(DEPOSIT|INSTAL)"), "Bonds / Deposits"),
+        new(Rx(@"\bNPS\b|NATIONAL\s*PENSION|\bPPF\b|PUBLIC\s*PROVIDENT"), "Retirement / PPF"),
+        new(Rx(@"\bFNO\b|\bF\s*&\s*O\b|\bFUTURES?\b|\bDERIVATIVES?\b|\bOPTIONS?\b.*\b(TRAD|PREMIUM|MARGIN|SETTLE)|\b(NIFTY|BANKNIFTY)\b.*\b(CALL|PUT|CE|PE)\b"), "F&O / Derivatives"),
+        new(Rx(@"\bETF\b|\bINDEX\s*FUND\b"), "ETF / Index Fund"),
+        new(Rx(@"\bSIPP?E\b|\bPORTFOLIO\b|\bMUTUAL\s*PORT"), "Portfolio"),
+        // Checked before the generic MF rules below: an LIC/insurance investment premium also
+        // contains "MF", and without this it would be filed as a plain mutual fund.
+        new(Rx(@"\bLIC\b.*INVEST|\bLIC\b.*MF\b|INSURANCE.*INVEST|ENDOWMENT|LIABILITY\s*CONDITION"), "Insurance-linked Investment"),
+        // Aggregator handles that carry only an abbreviation ("FTMF", "Sundaram MF",
+        // "ICIPRU", "HDFCMF") with no rail or instrument word of their own.
+        new(Rx(@"\bSUNDARAM\b.*\b(MF|MUTUAL|FUND|SIP)\b|\bFTMF\b|\bICIPRU\b|\bHDFCMF\b|\bAXISMF\b|\bSBI(?:M|X)F\b|\bKOTAK.*MF\b|\bNFO\b"), "Mutual Fund (aggregator)"),
+        // NB: do not add "\bFINO\b" or a bare "BillDesk"/"billdeskpg" here. Fino and BillDesk
+        // are payment FACILITATORS: ordinary UPI groceries route through them, and matching
+        // them booked real spends as investments. Require a fund word alongside the prefix.
+    };
+
+    /// <summary>
+    /// Classifies a securities movement. Returns null when the line is not one, so the
+    /// caller falls through to the existing category checks unchanged.
+    ///
+    /// Deliberately conservative about equities: a bare "NSE"/"BSE" reference is a
+    /// clearing reference that can also appear on an unrelated transfer, so it needs a
+    /// supporting instrument or investment keyword before it counts.
+    /// </summary>
+    private static (string Platform, string Instrument)? DetectSecurities(string desc)
+    {
+        desc = NormalizeDesc(desc);
+        var d = desc.ToUpperInvariant();
+        if (d.Length == 0) return null;
+
+        // Institution-level rails: a hit is decisive on its own.
+        string? platform = null;
+        foreach (var r in SecurityRailPatterns)
+        {
+            if (!r.Regex.IsMatch(desc)) continue;
+
+            // Skip the weak clearing matches unless an instrument keyword backs them.
+            if (r.Platform is "NSE / BSE Clearing" or "SEBI" or "RTA" or "Demat Account")
+            {
+                var hasInstrument = Rx(@"MUTUAL|FUND|UNIT|SIP|ETF|BOND|SECURIT|EQUITY|SHARE|STOCK|DEMAT|PURCHASE|SELL|SUBSCR|REDEMPT|FOLIO|PORTFOLIO|INVEST").IsMatch(d);
+                if (!hasInstrument) continue;
+            }
+            platform = r.Platform;
+            break;
+        }
+
+        var isInstrument = IsDerivatives(desc) || Rx(@"MUTUAL\s*FUND|\bMF\b|\bSIP\b|FOLIO|\bETF\b|INDEX\s*FUND|\bBOND\b|\bNCD\b|\bG-SEC\b|\bSECURITIES\b|DEMAT|\bCAMS\b|\bAMFI\b|\bKFIN\b|PORTFOLIO|LIC\s*INVEST").IsMatch(d);
+
+        // CAMS "transfer" handles for direct-fund SIPs: CTIDFCMUTF, CTBANDHANM, CT<fund>...
+        // These name neither a rail nor the word "mutual fund", so they look exactly like a
+        // NACH loan debit. The CT prefix plus the absence of "loan" is what distinguishes them.
+        var isCamsTransfer = Rx(@"\bCT(?:IDFCMUTF|BANDHANM|HDFCMF|AXISMF|SBIMF|ICICIMF|NIPPONMF)[A-Z0-9]*\b").IsMatch(desc) && !Rx(@"\bLOAN\b|\bLOAN\s*EMI\b").IsMatch(d);
+
+        if (platform == null && !isInstrument && !isCamsTransfer) return null;
+
+        // Ambiguity guard: a line that ALSO reads as a loan obligation is reported by the
+        // EMI/disbursement sections instead, which carry the loan context. Duplicating it
+        // here would double-count it in the debt totals.
+        if (Rx(@"EMI\b|LOAN\s*(EMI|REPAY|INST|ACCT)|EMI\s*(AMT|AMOUNT)|NACH\s*(MANDATE)?.*\bEMI\b").IsMatch(d) && platform == null)
+            return null;
+
+        var instrument =
+            isCamsTransfer && !isInstrument ? "Mutual Fund" :
+            Rx(@"\bLIC\b.*INVEST|\bLIC\b.*MF\b|INSURANCE.*INVEST|ENDOWMENT|LIABILITY\s*CONDITION").IsMatch(d) ? "Insurance-linked" :
+            Rx(@"MUTUAL\s*FUND|\bMF\b|\bSIP\b|FOLIO|\bAMC\b|\bFTMF\b|\bNFO\b|\bICIPRU\b|\bHDFCMF\b|\bCAMS\b|\bKFIN\b|KFINETECH|\bKARVY\b").IsMatch(d) ? "Mutual Fund" :
+            Rx(@"\bETF\b|INDEX\s*FUND").IsMatch(d) ? "ETF / Index Fund" :
+            Rx(@"\bFIXED\s*DEPOSIT\b|\bFD\b.*(INVEST|PURCHASE)|\bRD\b.*(DEPOSIT|INSTAL)|RECURRING\s*DEPOSIT").IsMatch(d) ? "Fixed / Recurring Deposit" :
+            Rx(@"\bBOND\b|\bNCD\b|\bG-SEC\b|\bGOVT\s*SEC|TREASURY\s*BILL").IsMatch(d) ? "Bond / Debt" :
+            Rx(@"\bNPS\b|NATIONAL\s*PENSION|\bPPF\b|PUBLIC\s*PROVIDENT").IsMatch(d) ? "Retirement / PPF" :
+            IsDerivatives(desc) ? "F&O / Derivatives" :
+            Rx(@"\bEQUITY|\bSHARE|\bSTOCK|\bNSE\b|\bBSE\b").IsMatch(d) ? "Equity" :
+            "Securities";
+
+        return (platform ?? "Demat / RTA", instrument);
+    }
+
     // ── STOCK MARKET / BROKING PLATFORMS ────────────────────────────
     private static readonly Sip[] StockMarketPatterns =
     {
-        new(Rx(@"ZERODHA|KITE\b|KITEAPP|\bCOIN\b"), "Zerodha"),
+        new(Rx(@"ZERODHA|KITEAPP"), "Zerodha"),
+        new(Rx(@"GROWW"), "Groww"),
+        new(Rx(@"PAYTM\s*MONEY|PAYTMMONEY"), "Paytm Money"),
         new(Rx(@"UPSTOX|UPSTX"), "Upstox"),
         new(Rx(@"ANGEL\s*ONE|ANGEL\s*BROKING|ANGELBRK"), "Angel One"),
         new(Rx(@"FYERS"), "Fyers"),
@@ -203,7 +301,7 @@ public static partial class BsaAnalyzer
     private sealed record Insurance(Regex Regex, string Provider, string Type);
     private static readonly Insurance[] InsurancePatterns =
     {
-        new(Rx(@"\bLIC\b|LICINDIA|LIC.*PREM"), "LIC", "life"),
+        new(Rx(@"\bLIC\b(?!\s*(HFL|HOUSING))|LICINDIA|LIC.*PREM"), "LIC", "life"),
         new(Rx(@"HDFC.*LIFE|HDFCLIFE"), "HDFC Life", "life"),
         new(Rx(@"ICICI.*PRU.*LIFE|ICICIPRULIFE"), "ICICI Prudential Life", "life"),
         new(Rx(@"SBI.*LIFE|SBILIFE"), "SBI Life", "life"),
@@ -216,7 +314,9 @@ public static partial class BsaAnalyzer
         new(Rx(@"CARE.*HEALTH|CAREHEALTH"), "Care Health", "health"),
         new(Rx(@"NEW.*INDIA.*ASSU|NEWINDIAASSUR"), "New India Assurance", "health"),
         new(Rx(@"NATIONAL.*INSURANCE"), "National Insurance", "health"),
-        new(Rx(@"DIGIT.*INSURANCE|\bDIGIT\b"), "Digit Insurance", "general"),
+        new(Rx(@"DIGIT.*INSURANCE|GODIGIT"), "Digit Insurance", "general"),
+        new(Rx(@"ICICI.*LOMBARD"), "ICICI Lombard", "general"),
+        new(Rx(@"HDFC.*ERGO"), "HDFC ERGO", "general"),
         new(Rx(@"RELIANCE.*GENERAL"), "Reliance General Insurance", "general"),
         new(Rx(@"PMSBY"), "PMSBY (Govt)", "accidental"),
         new(Rx(@"PMJJBY"), "PMJJBY (Govt)", "life"),
@@ -514,50 +614,41 @@ public static partial class BsaAnalyzer
     {
         var d = NormalizeDesc(desc);
         if (!isCredit) return null;
-        if (AnyMatch(d, SalaryKeywords)) return InferSalaryEmployer(d);
-
-        if (DetectNach(d))
-        {
-            var negative = Rx(@"\b(EMI|INSTAL+MENT|SALARY|LOAN|REPAY|APY|PENSION|INSURANCE|PREM|SIP|MUTUAL|MF\b|CARD|CC\b|BILLDESK|DEMAT|DP\s*CHARGES|CDSL|NSDL|PAYOUT|PAYIN)\b");
-            if (!negative.IsMatch(d) && amount >= 5000) return InferSalaryEmployer(d);
-        }
-
-        var channel = Rx(@"\b(NEFT|IMPS|RTGS)\b");
-        if (channel.IsMatch(d) && amount >= 5000)
-        {
-            var salaryLike = Rx(@"\b(SALARY|PAYROLL|WAGES|STIPEND|BONUS|INCENTIVE|SAL/|\bSAL\b)\b");
-            var negative = Rx(@"\b(LOAN|DISB|DISBURSE|SANCTION|OD\b|OVERDRAFT|CREDIT\s*LIMIT)\b");
-            if (!negative.IsMatch(d) && salaryLike.IsMatch(d)) return InferSalaryEmployer(d);
-        }
-
-        return null;
+        // A payment channel or a large recurring credit is not proof of salary.
+        if (DetectAppLoan(d) != null || Rx(@"\b(LOAN|REFUND|REVERSAL|REVERSED|RETURN)\b|DISBURS|SALARY\s*ADVANCE").IsMatch(d))
+            return null;
+        return Rx(@"\b(SALARY|PAYROLL|WAGES|STIPEND|BONUS|INCENTIVE|SAL)\b").IsMatch(d)
+            ? InferSalaryEmployer(d) : null;
     }
 
     private static (string Bank, string BankCategory, LoanType LoanType)? DetectLoanEmi(string desc, decimal amount)
     {
         if (Rx(@"\b(RETURN|INSUFFICIENT|SIGNATURE|ERRORS|DISCREPANCY|DAMAGE|OVERWRITING|CLOSED|FROZEN|BOUNCE|BOUNCED|FAILED|FAILURE|UNPAID|REJECT|REJECTED|CHARGE|CHARGES|PENALTY)\b").IsMatch(desc))
             return null;
-        foreach (var p in LenderPatterns)
-        {
-            if (p.Regex.IsMatch(desc) && DetectNach(desc))
-                return (p.Name, p.Category, DetectLoanType(desc));
-        }
-        var isAutoDebit = DetectNach(desc);
-        if (!isAutoDebit && !Rx(@"EMI|LOAN\s*INST|INSTALMENT|REPAY").IsMatch(desc)) return null;
-        if (isAutoDebit && amount >= 500)
-        {
-            var lender = DetectLender(desc);
-            return (
-                lender?.Name ?? (InferAutoDebitLender(desc).Length > 0 ? InferAutoDebitLender(desc) : "Unknown Lender (NACH)"),
-                lender?.Category ?? "Unknown",
-                DetectLoanType(desc));
-        }
-        return null;
+
+        // A securities/investment movement is NOT a debt obligation, however it is
+        // presented. Without this guard, recurring NACH/ACH debits to RTA and mutual-fund
+        // rails (CAMS, HDFCMF, FTMF, Sundaram MF ...) fell through the auto-debit branch
+        // below and were reported as "Personal Loan" EMIs — 49 phantom EMIs on one real
+        // statement, which then inflated TotalEmiMonthly, the DTI ratio and the
+        // estimated total debt used for underwriting.
+        if (DetectSecurities(desc) != null || DetectSip(desc) != null || DetectStockMarket(desc) != null ||
+            DetectInsurance(desc) != null || ClassifyCreditCardPayment(desc) != null ||
+            DetectPf(desc) || DetectUtility(desc) != null || DetectRent(desc)) return null;
+
+        var explicitLoan = Rx(@"\bEMI\b|LOAN\s*(INST|REPAY|PAYMENT)|\bINSTAL+MENTS?\b|\bREPAYMENT\b").IsMatch(desc);
+        var lender = DetectLender(desc);
+        // NACH/ECS/SI is used for many bills and investments. Require loan evidence.
+        if (amount <= 0 || (!explicitLoan && !(DetectNach(desc) && lender != null))) return null;
+        return (lender?.Name ?? (InferAutoDebitLender(desc).Length > 0 ? InferAutoDebitLender(desc) : "Unknown Lender"),
+            lender?.Category ?? "Unknown", DetectLoanType(desc));
     }
 
     private static (string Lender, string LenderCategory, LoanType LoanType)? DetectLoanDisbursement(string desc, decimal amount, bool isCredit)
     {
-        if (!isCredit || amount < 5000) return null;
+        if (!isCredit || amount < 5000 || DetectSalary(desc, amount, true) != null ||
+            DetectInsurance(desc) != null || DetectStockMarket(desc) != null ||
+            DetectSip(desc) != null || DetectSecurities(desc) != null) return null;
         foreach (var p in DisbursementKeywords)
         {
             if (p.IsMatch(desc))
@@ -585,10 +676,13 @@ public static partial class BsaAnalyzer
 
     private static string? DetectSip(string desc)
     {
-        var d = (desc ?? "").ToUpperInvariant();
+        desc = NormalizeDesc(desc);
+        var d = desc.ToUpperInvariant();
         var isMf = Rx(@"\bMF\b|MUTUAL|SIP|FOLIO|AMC\b|\bCAMS\b|KFIN|KARVY").IsMatch(d);
         var isStock = Rx(@"\bNSE\b|\bBSE\b|\bEQUITY\b|\bSTOCK\b|\bSHARES?\b|\bBROK").IsMatch(d);
         if (isStock && !isMf) return null;
+        var securities = DetectSecurities(desc);
+        if (securities?.Instrument == "Mutual Fund") return securities.Value.Platform;
         foreach (var p in SipPatterns)
         {
             if (p.Regex.IsMatch(desc))
@@ -600,12 +694,43 @@ public static partial class BsaAnalyzer
         return null;
     }
 
+    private static bool IsDerivatives(string desc) =>
+        Rx(@"\bFNO\b|\bF\s*&\s*O\b|\bFUTURES?\b|\bDERIVATIVES?\b|\bOPTIONS?\b.*\b(TRAD\w*|PREMIUM|MARGIN|SETTLE\w*)\b|\b(NIFTY|BANKNIFTY)\b.*\b(CALL|PUT|CE|PE)\b").IsMatch(desc);
+
+    private static BsaStockMarketRow StockMarketRow(string date, string desc, string platform, decimal amount, bool credit)
+    {
+        var segment = IsDerivatives(desc) ? "F&O" :
+            Rx(@"\bEQUITY\b|\bSHARES?\b|\bSTOCKS?\b|\bINTRADAY\b|\bIPO\b").IsMatch(desc) ? "Equity" : "Unspecified";
+        var activity = Rx(@"\b(CHARGES?|FEES?|BROKERAGE)\b").IsMatch(desc) ? "Broker / demat charges" :
+            segment == "F&O" ? (Rx(@"\bMARGIN\b").IsMatch(desc) ? "F&O margin" : "F&O settlement / activity") :
+            segment == "Equity" && credit && Rx(@"\b(SELL|SOLD|SALE)\b").IsMatch(desc) ? "Share sale proceeds" :
+            segment == "Equity" && !credit && Rx(@"\b(BUY|BOUGHT|PURCHASE)\b").IsMatch(desc) ? "Share purchase" :
+            credit && Rx(@"\bDIVIDEND\b").IsMatch(desc) ? "Dividend" :
+            credit ? "Broker payout / withdrawal" : "Broker funding / transfer";
+        var review = segment == "Unspecified" || activity.StartsWith("Broker payout") || activity.StartsWith("Broker funding");
+        return new BsaStockMarketRow
+        {
+            Date = date, Direction = credit ? "credit" : "debit", Platform = platform,
+            Amount = amount, Description = desc, Segment = segment, Activity = activity, NeedsReview = review,
+            ClassificationReason = review
+                ? "Broker transfer identified; the bank narration does not establish the underlying trade."
+                : "Explicit instrument/activity wording in the bank narration; no trade quantity or profit inferred."
+        };
+    }
+
+    private static string InvestmentActivity(string desc, bool credit) =>
+        credit ? (Rx(@"\bDIVIDEND\b").IsMatch(desc) ? "Dividend" :
+            Rx(@"\bMATURITY\b|MATURED").IsMatch(desc) ? "Maturity proceeds" :
+            Rx(@"REDEMP|REDEEM").IsMatch(desc) ? "Redemption" : "Investment receipt / transfer") :
+        Rx(@"\bSIP\b").IsMatch(desc) ? "SIP contribution" : "Investment purchase / contribution";
+
     private static string? DetectStockMarket(string? desc)
     {
         if (string.IsNullOrEmpty(desc)) return null;
         var d = NormUpper(desc);
         var isMf = Rx(@"\bMF\b|MUTUAL|SIP|FOLIO|AMC\b|\bCAMS\b|KFIN|KARVY").IsMatch(d);
-        var isStock = Rx(@"\bNSE\b|\bBSE\b|\bEQUITY\b|\bSTOCK\b|\bSHARES?\b|\bBROK(ING)?\b|DP\s*CHARGES|\bDEMAT\b|CDSL|NSDL|\bPAYOUT\b|\bPAYIN\b|\bMARGIN\b|\bFNO\b|F&O|\bFUTURES\b|\bOPTIONS\b|\bINTRADAY\b|\bIPO\b").IsMatch(d);
+        if (DetectSecurities(desc)?.Instrument == "Mutual Fund") return null;
+        var isStock = IsDerivatives(desc) || Rx(@"\bEQUITY\b|\bSHARES?\b.*\b(BUY|PURCHASE|SALE|SELL|SOLD)\b|\b(BUY|PURCHASE|SALE|SELL|SOLD)\b.*\bSHARES?\b|\bBROK(ING|ER|ERAGE)\b|DP\s*CHARGES|\bDEMAT\b|CDSL|NSDL|\bINTRADAY\b|\bIPO\b|\b(NSE|BSE)\b.*\b(TRADE|SETTLEMENT|MARGIN|PAYIN|PAYOUT)\b").IsMatch(d);
         var isUpi = Rx(@"\bUPI\b|\bUPIAR\b|\bUPI/").IsMatch(d);
         foreach (var p in StockMarketPatterns)
         {
@@ -617,7 +742,7 @@ public static partial class BsaAnalyzer
         {
             if (isUpi)
             {
-                var strong = Rx(@"DP\s*CHARGES|\bDEMAT\b|CDSL|NSDL|\bPAYOUT\b|\bPAYIN\b|\bFNO\b|F&O|\bFUTURES\b|\bOPTIONS\b|\bINTRADAY\b");
+                var strong = Rx(@"DP\s*CHARGES|\bDEMAT\b|CDSL|NSDL|\bPAYOUT\b|\bPAYIN\b|\bFNO\b|F&O|\bFUTURES\b|\bOPTIONS\b|\bINTRADAY\b|\b(EQUITY|SHARES?)\b.*\b(BUY|PURCHASE|SALE|SELL|SOLD)\b|\b(BUY|PURCHASE|SALE|SELL|SOLD)\b.*\b(EQUITY|SHARES?)\b");
                 if (!strong.IsMatch(d)) return null;
             }
             return "Stock Market";
@@ -627,6 +752,9 @@ public static partial class BsaAnalyzer
 
     private static (string Provider, string Type)? DetectInsurance(string desc)
     {
+        // LIC also has mutual-fund products; a fund payment is not a policy premium.
+        if (Rx(@"\bMF\b|MUTUAL\s*FUND|\bSIP\b").IsMatch(desc) &&
+            !Rx(@"\b(PREMIUM|POLICY|ULIP|ENDOWMENT)\b").IsMatch(desc)) return null;
         foreach (var p in InsurancePatterns)
             if (p.Regex.IsMatch(desc)) return (p.Provider, p.Type);
         return null;
@@ -692,7 +820,8 @@ public static partial class BsaAnalyzer
         var signalsStrong = new[]
         {
             @"\bCREDIT\s*CARD\b", @"\bCRDT\s*CARD\b", @"\bCARD\s*(?:BILL|DUE)\b",
-            @"\bCC\s*(?:PAYMENT|PAY|PMT)\b", @"\bCREDITCARD\b",
+            @"\bCC\s*(?:PAYMENT|PAY|PMT|BILL|DUE)\b", @"\bCREDITCARD\b",
+            @"\b(SBICARD|HDFCCC|ICICICC|AXISCC|KOTAKCC|RBLCC|AMEX|AMERICAN\s*EXPRESS)\b",
         };
         var signalsIssuer = new[] { @"\bCARD\b.*\bPAYMENT\b", @"\bVISA\b", @"\bMASTERCARD\b", @"\bRUPAY\b" };
         var negatives = new[] { @"\bUPI\b", @"\bUPIAR\b", @"\bUPI/" };
@@ -701,8 +830,15 @@ public static partial class BsaAnalyzer
         if (AnyMatch(d, signalsStrong)) score += 6;
         if (Regex.IsMatch(d, @"\bBILLDESK\b") && Regex.IsMatch(d, @"\b(CARD|CC|CREDIT)\b")) score += 3;
         if (AnyMatch(d, signalsIssuer) && Regex.IsMatch(d, @"\b(CARD|CC)\b")) score += 2;
+        if (Regex.IsMatch(d, @"\bCARD\b.*\bPAYMENT\b") &&
+            Regex.IsMatch(d, @"\b(HDFC|ICICI|SBI|AXIS|KOTAK|INDUSIND|RBL|IDFC|AMEX)\b")) score += 4;
 
-        if (Regex.IsMatch(d, @"\bPAID\s+VIA\s+CRED\b") || Regex.IsMatch(d, @"\bCREDPAY\b")) return null;
+        // CRED also processes merchant purchases: only a bill/card signal qualifies.
+        if (Regex.IsMatch(d, @"\bDEBIT\s*CARD\b")) return null;
+        if (Regex.IsMatch(d, @"\b(POS|ECOM)\b") &&
+            !Regex.IsMatch(d, @"\b(PAYMENT|BILL|DUE|PMT)\b")) return null;
+        if (Regex.IsMatch(d, @"\bPAID\s+VIA\s+CRED\b") &&
+            Regex.IsMatch(d, @"\b(HDFC|ICICI|SBI|AXIS|KOTAK|RBL|AMEX)\b")) score += 6;
 
         var isUpi = AnyMatch(text, negatives);
         if (isUpi && score < 5) score -= 4;
@@ -720,7 +856,7 @@ public static partial class BsaAnalyzer
         var upper = text.ToUpperInvariant();
 
         string? platform = null;
-        if (Regex.IsMatch(upper, @"\bPAID\s+VIA\s+CRED\b") || Regex.IsMatch(upper, @"\bCREDPAY\b")) platform = "CRED";
+        if (Regex.IsMatch(upper, @"\bCRED\b|\bCREDPAY\b")) platform = "CRED";
         else if (Regex.IsMatch(upper, @"\bBILLDESK\b")) platform = "BillDesk";
 
         string? channel = null;
@@ -737,6 +873,13 @@ public static partial class BsaAnalyzer
         {
             var m = Regex.Match(upper, @"\b(HDFC|ICICI|SBI|AXIS|KOTAK|INDUSIND|YESB|YES\s*BANK|IDFC|RBL|AU\s*BANK|FEDERAL|PNB|BOB|CANARA|UNION\s*BANK)\b");
             if (m.Success) issuerBank = Regex.Replace(m.Value, @"\s+", " ").Trim();
+            else if (Regex.IsMatch(upper, @"\bSBICARD\b")) issuerBank = "SBI";
+            else if (Regex.IsMatch(upper, @"\bAMEX\b|AMERICAN\s*EXPRESS")) issuerBank = "American Express";
+            else
+            {
+                var compact = Regex.Match(upper, @"\b(HDFC|ICICI|AXIS|KOTAK|RBL)CC\b");
+                if (compact.Success) issuerBank = compact.Groups[1].Value;
+            }
         }
 
         string? payee = null;
@@ -784,7 +927,6 @@ public static partial class BsaAnalyzer
         result.AccountSummary.TransactionCount = transactions.Count;
         result.AccountSummary.Period = $"{transactions[0].Date} to {transactions[^1].Date}";
 
-        var emiSeen = new HashSet<string>();
         var processingFees = new List<(string Date, decimal Amount, string Description, BsaMeta Meta)>();
         var monthlyIndex = new Dictionary<string, BsaMonthlySummary>();
         var loanIndex = new Dictionary<string, BsaLoanSummaryItem>();
@@ -800,6 +942,21 @@ public static partial class BsaAnalyzer
             var balance = ParseAmount(tx.Balance);
             var month = MonthKey(date);
             var meta = ExtractTxnMeta(desc, tx);
+            var classified = new BsaClassifiedTransaction
+            {
+                Date = date, Description = desc, Debit = debit, Credit = credit, Balance = balance
+            };
+            CopyMeta(meta, classified);
+            result.Transactions.Add(classified);
+            void Mark(string category, string counterparty = "", string instrument = "", string activity = "", bool review = false, string? reason = null)
+            {
+                classified.Category = category;
+                classified.Counterparty = counterparty;
+                classified.Instrument = instrument;
+                classified.Activity = activity;
+                classified.NeedsReview = review;
+                classified.ClassificationReason = reason ?? $"{category} identified from narration and transaction direction.";
+            }
 
             if (!monthlyIndex.TryGetValue(month, out var ms))
             {
@@ -810,6 +967,14 @@ public static partial class BsaAnalyzer
             if (isCredit) { ms.Credits += credit; result.AccountSummary.TotalCredits += credit; }
             if (isDebit) { ms.Debits += debit; result.AccountSummary.TotalDebits += debit; }
             if (balance > 0) ms.ClosingBalance = balance;
+
+            if (isCredit == isDebit)
+            {
+                Mark("Needs review", review: true, reason: "Both debit and credit are populated, or neither has a positive amount.");
+                if (isCredit) result.OtherIncome.Add(new BsaOtherIncomeRow { Date = date, Description = desc, Amount = credit });
+                if (isDebit) result.OtherDebits.Add(new BsaOtherDebitRow { Date = date, Description = desc, Amount = debit });
+                continue;
+            }
 
             // ══════════════ CREDIT SIDE ══════════════
             if (isCredit)
@@ -831,6 +996,7 @@ public static partial class BsaAnalyzer
                     };
                     CopyMeta(meta, row);
                     result.LoanDisbursements.Add(row);
+                    Mark("Loan disbursement", row.Lender, row.LoanTypeLabel, "Loan credit", row.Lender == "Unknown Lender");
                     ms.Disbursements += credit;
                     continue;
                 }
@@ -849,6 +1015,7 @@ public static partial class BsaAnalyzer
                     };
                     CopyMeta(meta, row);
                     result.Salary.Add(row);
+                    Mark("Salary", row.Employer, activity: "Salary / employment income credit");
                     ms.Salary += credit;
                     continue;
                 }
@@ -864,6 +1031,7 @@ public static partial class BsaAnalyzer
                     CopyMeta(meta, row);
                     result.PfEpfo.Add(row);
                     result.PfCredits.Add(row);
+                    Mark("PF / EPFO", row.Source, activity: "PF receipt");
                     ms.Pf += credit;
                     continue;
                 }
@@ -872,19 +1040,38 @@ public static partial class BsaAnalyzer
                 var govt = DetectGovtScheme(desc);
                 if (govt != null)
                 {
+                    Mark("Government scheme", govt.Value.Name, activity: "Benefit credit");
                     result.GovtSchemeCredits.Add(new BsaGovtSchemeRow
                     { Date = date, Description = desc, Amount = credit, SchemeName = govt.Value.Name, Type = govt.Value.Type });
                     continue;
                 }
 
-                // 5. STOCK MARKET (credit = sale / payout)
+                // 5. STOCK MARKET (credit = broker receipt; not necessarily a sale)
                 var smCredit = DetectStockMarket(desc);
                 if (smCredit != null)
                 {
-                    var row = new BsaStockMarketRow
-                    { Date = date, Direction = "credit", Platform = smCredit, Amount = credit, Description = desc };
+                    var row = StockMarketRow(date, desc, smCredit, credit, true);
                     CopyMeta(meta, row);
                     result.StockMarket.Add(row);
+                    Mark("Stock market", row.Platform, row.Segment, row.Activity, row.NeedsReview, row.ClassificationReason);
+                    continue;
+                }
+
+                // 5b. SECURITIES (credit = redemption, sale, dividend, maturity)
+                // Sales are already caught above by the broking platforms; this picks up the
+                // RTA/demat rails (CAMS, KFin, DP) that a broker's own descriptor lacks.
+                var secCredit = DetectSecurities(desc);
+                if (secCredit != null)
+                {
+                    var row = new BsaSecuritiesRow
+                    {
+                        Date = date, Direction = "credit", Platform = secCredit.Value.Platform,
+                        Instrument = secCredit.Value.Instrument, Amount = credit, Description = desc,
+                        Activity = InvestmentActivity(desc, true)
+                    };
+                    CopyMeta(meta, row);
+                    result.Securities.Add(row);
+                    Mark("Investment", row.Platform, row.Instrument, row.Activity);
                     continue;
                 }
 
@@ -900,12 +1087,15 @@ public static partial class BsaAnalyzer
                     processingFees.Add((date, debit, desc, meta));
 
                 var bounce = DetectBounceOrCharges(desc);
-                if (bounce != null)
+                // Demat/broker fees are stock-market activity, not loan bounces.
+                if (bounce != null && !(DetectStockMarket(desc) != null &&
+                    !Rx(@"\b(RETURN|BOUNCE|BOUNCED|FAILED|REJECTED|UNPAID|PENALTY)\b").IsMatch(desc)))
                 {
                     var row = new BsaBounceRow
                     { Date = date, Description = desc, Amount = debit, Category = bounce.Value.Category, Channel = bounce.Value.Channel };
                     CopyMeta(meta, row);
                     result.BounceCharges.Add(row);
+                    Mark("Charges / returns", activity: row.Category);
                     continue;
                 }
 
@@ -915,6 +1105,7 @@ public static partial class BsaAnalyzer
                     var row = new BsaApyRow { Date = date, Description = desc, Amount = debit };
                     CopyMeta(meta, row);
                     result.ApyPension.Add(row);
+                    Mark("Pension", "APY", "Retirement", "Pension contribution");
                     continue;
                 }
 
@@ -922,10 +1113,8 @@ public static partial class BsaAnalyzer
                 var emiInfo = DetectLoanEmi(desc, debit);
                 if (emiInfo != null)
                 {
-                    var key = $"{date}|{emiInfo.Value.Bank}|{emiInfo.Value.LoanType.Code}|{debit}";
-                    if (!emiSeen.Contains(key))
+                    // Keep every statement row: two same-day payments can be different loans.
                     {
-                        emiSeen.Add(key);
                         var row = new BsaEmiRow
                         {
                             Date = date, Description = desc,
@@ -940,6 +1129,9 @@ public static partial class BsaAnalyzer
                         };
                         CopyMeta(meta, row);
                         result.EmiPayments.Add(row);
+                        Mark("EMI / loan repayment", row.Bank, row.LoanTypeLabel, "Loan repayment",
+                            row.BankCategory == "Unknown" || !Rx(@"\bEMI\b|LOAN\s*(INST|REPAY|PAYMENT)|\bINSTAL+MENTS?\b|\bREPAYMENT\b").IsMatch(desc),
+                            "Loan repayment wording or a recognized lender auto-debit; verify unspecified loan type against the loan statement.");
                         result.Loans.Add(row);
 
                         if (!loanIndex.TryGetValue(emiInfo.Value.Bank, out var ls))
@@ -971,6 +1163,7 @@ public static partial class BsaAnalyzer
                     { Date = date, Provider = ins.Value.Provider, PolicyType = ins.Value.Type, Amount = debit, Description = desc };
                     CopyMeta(meta, row);
                     result.Insurance.Add(row);
+                    Mark("Insurance", row.Provider, row.PolicyType, "Insurance premium");
                     continue;
                 }
 
@@ -978,10 +1171,10 @@ public static partial class BsaAnalyzer
                 var smDebit = DetectStockMarket(desc);
                 if (smDebit != null)
                 {
-                    var row = new BsaStockMarketRow
-                    { Date = date, Direction = "debit", Platform = smDebit, Amount = debit, Description = desc };
+                    var row = StockMarketRow(date, desc, smDebit, debit, false);
                     CopyMeta(meta, row);
                     result.StockMarket.Add(row);
+                    Mark("Stock market", row.Platform, row.Segment, row.Activity, row.NeedsReview, row.ClassificationReason);
                     continue;
                 }
 
@@ -990,9 +1183,31 @@ public static partial class BsaAnalyzer
                 if (sip != null)
                 {
                     var row = new BsaSipRow
-                    { Date = date, FundName = Trunc(desc, 60), Platform = sip, Amount = debit, Description = desc };
+                    {
+                        Date = date, FundName = Trunc(desc, 60), Platform = sip, Amount = debit, Description = desc,
+                        InvestmentType = Rx(@"\bSIP\b").IsMatch(desc) ? "SIP contribution" : "Mutual fund purchase / contribution"
+                    };
                     CopyMeta(meta, row);
                     result.SipInvestments.Add(row);
+                    Mark("Mutual fund", row.Platform, "Mutual Fund", row.InvestmentType);
+                    continue;
+                }
+
+                // 5b. SECURITIES / INVESTMENT (demat, RTA, MF units, bonds)
+                // Mutual-fund contributions are reported in the SIP/MF section above.
+                // Keep other investments separate so no transaction is counted twice.
+                var secDebit = DetectSecurities(desc);
+                if (secDebit != null)
+                {
+                    var row = new BsaSecuritiesRow
+                    {
+                        Date = date, Direction = "debit", Platform = secDebit.Value.Platform,
+                        Instrument = secDebit.Value.Instrument, Amount = debit, Description = desc,
+                        Activity = InvestmentActivity(desc, false)
+                    };
+                    CopyMeta(meta, row);
+                    result.Securities.Add(row);
+                    Mark("Investment", row.Platform, row.Instrument, row.Activity);
                     continue;
                 }
 
@@ -1004,6 +1219,7 @@ public static partial class BsaAnalyzer
                     { Date = date, AppName = app.Value.Name, MaxApr = app.Value.MaxApr, Amount = debit, Type = "repayment", Description = desc };
                     CopyMeta(meta, row);
                     result.AppLoans.Add(row);
+                    Mark("App loan", row.AppName, activity: "App-loan repayment");
                     continue;
                 }
 
@@ -1014,6 +1230,7 @@ public static partial class BsaAnalyzer
                     { Date = date, Payee = Trunc(desc, 50), Amount = debit, Description = desc, Mode = "UPI" };
                     CopyMeta(meta, row);
                     result.Rent.Add(row);
+                    Mark("Rent", row.Payee, activity: "Rent payment");
                     continue;
                 }
 
@@ -1031,6 +1248,7 @@ public static partial class BsaAnalyzer
                     };
                     CopyMeta(meta, row);
                     result.CreditCardPayments.Add(row);
+                    Mark("Credit card payment", row.CcIssuerBank ?? row.CcPlatform ?? "Credit card", activity: "Card bill payment");
                     continue;
                 }
 
@@ -1042,6 +1260,7 @@ public static partial class BsaAnalyzer
                     CopyMeta(meta, row);
                     result.PfEpfo.Add(row);
                     ms.Pf += debit;
+                    Mark("PF / EPFO", row.Source, activity: "PF contribution");
                     continue;
                 }
 
@@ -1053,6 +1272,7 @@ public static partial class BsaAnalyzer
                     { Date = date, Description = Trunc(desc, 60), Amount = debit, Category = util };
                     CopyMeta(meta, row);
                     result.Utilities.Add(row);
+                    Mark("Utility / expense", instrument: row.Category, activity: "Bill / expense payment");
                     continue;
                 }
 
@@ -1143,6 +1363,27 @@ public static partial class BsaAnalyzer
             R.Add("No life insurance premium detected — financial protection gap");
         if (result.LoanSummary.Count > 2)
             R.Add($"{result.LoanSummary.Count} active loans — debt consolidation recommended");
+
+        // ── SECURITIES / INVESTMENTS ──────────────────────────────────
+        if (result.Securities.Count > 0)
+        {
+            var invested = result.Securities.Where(s => s.Direction == "debit").Sum(s => s.Amount);
+            var returned = result.Securities.Where(s => s.Direction == "credit").Sum(s => s.Amount);
+            var instruments = result.Securities.Select(s => s.Instrument).Distinct().Count();
+            var sec = result.Securities.Count;
+
+            if (sec > 0)
+            {
+                R.Add($"{sec} securities/investment transaction(s) across {instruments} instrument type(s) — "
+                   + $"₹{Fmt(invested)} invested, ₹{Fmt(returned)} redeemed/received");
+            }
+            // A large redemption alongside a fresh disbursement often means borrowed money is
+            // being parked in investments rather than used for the stated purpose.
+            if (result.Securities.Count(s => s.Direction == "credit") > 0 && result.LoanDisbursements.Count > 0)
+            {
+                R.Add("Investment redemption detected alongside fresh loan disbursement — verify end-use of borrowed funds");
+            }
+        }
         var ccTotal = result.CreditCardPayments.Sum(x => x.Amount);
         if (ccTotal > 0) R.Add($"Credit card payments: ₹{Fmt(ccTotal)} — monitor revolving debt");
 
@@ -1160,6 +1401,8 @@ public static partial class BsaAnalyzer
             Rec.Add("PF withdrawal detected — consider VPF top-up for tax-free retirement returns");
         if (result.Insights.SavingsRate < 10)
             Rec.Add("Savings rate below 10% — budget review needed to identify discretionary spending");
+        if (result.Securities.Count(s => s.Direction == "debit") > 0)
+            Rec.Add("Continue systematic investing — regular securities purchases indicate disciplined savings");
 
         result.Insights.AdditionalFieldsNeeded = new List<string>
         {

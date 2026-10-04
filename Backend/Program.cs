@@ -1,4 +1,5 @@
 using System.Text;
+using System.IdentityModel.Tokens.Jwt;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -44,6 +45,9 @@ const string CorsPolicy = "_cipFrontend";
 builder.Services.AddCors(o => o.AddPolicy(CorsPolicy, p => p
     .WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
     .AllowAnyHeader()
+    // X-Session-End carries the sign-out reason; without exposing it the dev client
+    // cannot tell "idle" from "signed in elsewhere".
+    .WithExposedHeaders("X-Session-End")
     .AllowAnyMethod()));
 
 // JWT auth
@@ -63,6 +67,43 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             IssuerSigningKey = key,
             ClockSkew = TimeSpan.FromMinutes(1)
         };
+
+        // Single active session per employee + 15-minute idle logout.
+        // The signature is already trusted at this point; this asks a different question:
+        // "is this still the one live login for this employee, and is it still fresh?".
+        o.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                var empCodeClaim = context.Principal?.FindFirst("empCode")?.Value;
+                var jti = context.Principal?.FindFirst(JwtRegisteredClaimNames.Jti)?.Value
+                          ?? context.Principal?.FindFirst("jti")?.Value;
+                if (!int.TryParse(empCodeClaim, out var empCode) || string.IsNullOrEmpty(jti))
+                    return; // malformed token — leave the default validation outcome alone
+
+                var sessions = context.HttpContext.RequestServices.GetRequiredService<IUserSessionService>();
+                var check = await sessions.ValidateAndTouchAsync(empCode, jti);
+
+                if (check == SessionCheck.Ok) return;
+
+                // Lets the SPA say WHY it was signed out instead of a bare "session expired".
+                // NoSession means the row is simply gone — an explicit sign-out, or a session
+                // already reaped — which is different from being displaced by a second login.
+                context.HttpContext.Response.Headers["X-Session-End"] = check switch
+                {
+                    SessionCheck.IdleTimeout => "idle",
+                    SessionCheck.Superseded => "superseded",
+                    _ => "ended"
+                };
+
+                context.Fail(check switch
+                {
+                    SessionCheck.IdleTimeout => "Your session expired after 15 minutes of inactivity. Please sign in again.",
+                    SessionCheck.Superseded => "You have been signed out because this account was signed in somewhere else.",
+                    _ => "Your session has ended. Please sign in again."
+                });
+            }
+        };
     });
 builder.Services.AddAuthorization(options =>
 {
@@ -77,6 +118,7 @@ builder.Services.AddSingleton<IHierarchyService, HierarchyService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IAccessControlService, AccessControlService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IUserSessionService, UserSessionService>();
 builder.Services.AddScoped<ITotpService, TotpService>();
 builder.Services.AddHttpClient<ICibilService, CibilService>();
 builder.Services.AddSingleton<IOcrService, OcrService>();

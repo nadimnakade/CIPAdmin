@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from './Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 
 interface DocRow {
   docId: number;
@@ -24,7 +26,7 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [notice, setNotice] = useState('');
+  
   const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -51,10 +53,9 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
       form.append('file', file);
       form.append('docType', docType);
       await api.upload(`/api/employees/${empCode}/documents`, form);
-      setNotice(`${docType} uploaded.`);
+      toast.success(`${docType} uploaded.`);
       setFile(null);
       if (fileRef.current) fileRef.current.value = '';
-      setTimeout(() => setNotice(''), 3500);
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Upload failed');
@@ -64,11 +65,16 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
   };
 
   const remove = async (d: DocRow) => {
-    if (!window.confirm(`Delete "${d.fileName}"? This cannot be undone.`)) return;
+    const ok = await confirmAction({
+      title: 'Delete this document?',
+      text: `“${d.fileName}” is removed permanently. This cannot be undone.`,
+      confirmText: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.delete(`/api/employees/documents/${d.docId}`);
-      setNotice('Document deleted.');
-      setTimeout(() => setNotice(''), 3000);
+      toast.success('Document deleted.');
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Delete failed');
@@ -95,7 +101,12 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
   };
 
   const generateOffer = async () => {
-    if (!window.confirm(`Generate a fresh offer letter PDF for ${empName}? It will be saved to this employee's documents.`)) return;
+    const ok = await confirmAction({
+      title: 'Generate a fresh offer letter?',
+      text: `A new PDF is generated for ${empName} and saved to this employee's documents.`,
+      confirmText: 'Generate',
+    });
+    if (!ok) return;
     setGenerating(true);
     setError('');
     try {
@@ -103,8 +114,7 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      setNotice('Offer letter generated and saved.');
-      setTimeout(() => setNotice(''), 3500);
+      toast.success('Offer letter generated and saved.');
       await load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Offer letter generation failed');
@@ -124,7 +134,6 @@ export default function DocumentsDrawer({ empCode, empName, onClose }: { empCode
           <button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="close" /></button>
         </div>
 
-        {notice && <div className="alert success">{notice}</div>}
         {error && <div className="alert error">{error}</div>}
 
         <div className="drawer-upload">

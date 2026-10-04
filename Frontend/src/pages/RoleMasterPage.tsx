@@ -1,6 +1,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager } from '../components/tableView';
 
 interface RoleRow {
@@ -59,7 +61,7 @@ export default function RoleMasterPage() {
   const [privRole, setPrivRole] = useState<RoleRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -89,22 +91,35 @@ export default function RoleMasterPage() {
   useEffect(() => { loadPrivileges(); }, [loadPrivileges]);
 
   const toggleStatus = async (r: RoleRow) => {
-    const verb = r.isActive ? 'deactivate' : 'activate';
-    if (!confirm(`Are you sure you want to ${verb} role "${r.roleName}"?`)) return;
+    const verb = r.isActive ? 'Deactivate' : 'Activate';
+    const ok = await confirmAction({
+      title: `${verb} role "${r.roleName}"?`,
+      text: r.isActive
+        ? `Members of this role (${r.employeeCount} employee${r.employeeCount === 1 ? '' : 's'}) lose the menus and privileges it grants.`
+        : 'Members of this role regain the menus and privileges it grants.',
+      confirmText: verb,
+    });
+    if (!ok) return;
     try {
       await api.put(`/api/roles/${r.roleId}/status`, { isActive: !r.isActive });
-      setNotice(`Role "${r.roleName}" ${r.isActive ? 'deactivated' : 'activated'}.`);
+      toast.success(`Role "${r.roleName}" ${r.isActive ? 'deactivated' : 'activated'}.`);
       load();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : `${verb[0].toUpperCase()}${verb.slice(1)} failed`);
+      setError(e instanceof ApiError ? e.message : `${verb} failed`);
     }
   };
 
   const remove = async (r: RoleRow) => {
-    if (!confirm(`Delete role "${r.roleName}"? This removes its privilege grants too.`)) return;
+    const ok = await confirmAction({
+      title: `Delete role "${r.roleName}"?`,
+      text: 'This also removes every privilege grant attached to the role.',
+      confirmText: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
     try {
       await api.delete('/api/roles/' + r.roleId);
-      setNotice(`Role "${r.roleName}" deleted.`);
+      toast.success(`Role "${r.roleName}" deleted.`);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Delete failed');
@@ -149,7 +164,7 @@ export default function RoleMasterPage() {
         </button>
       </div>
 
-      {notice && <div className="alert success">{notice}</div>}
+      
 
       {tab === 'employees' ? (
         <EmployeePrivilegesTab />
@@ -237,7 +252,7 @@ export default function RoleMasterPage() {
         <RoleModal
           role={editRole}
           onClose={() => { setShowAdd(false); setEditRole(null); }}
-          onSaved={(msg) => { setShowAdd(false); setEditRole(null); setNotice(msg); load(); loadPrivileges(); }}
+          onSaved={(msg) => { setShowAdd(false); setEditRole(null); toast.success(msg); load(); loadPrivileges(); }}
         />
       )}
 
@@ -269,7 +284,7 @@ function EmployeePrivilegesTab() {
   const [detail, setDetail] = useState<EmpPrivRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -301,7 +316,7 @@ function EmployeePrivilegesTab() {
 
   return (
     <div className="card">
-      {notice && <div className="alert success">{notice}</div>}
+      
       <div className="table-toolbar">
         <div className="search-box">
           <Icon name="search" />
@@ -375,7 +390,7 @@ function EmployeePrivilegesTab() {
         <EmployeePrivilegeModal
           emp={detail}
           onClose={() => setDetail(null)}
-          onSaved={(msg) => { setNotice(msg); load(); }}
+          onSaved={(msg) => { toast.success(msg); load(); }}
         />
       )}
     </div>

@@ -1,3 +1,5 @@
+import { trackedFetch } from './lib/loading';
+
 const TOKEN_KEY = 'cip_token';
 const USER_KEY = 'cip_user';
 
@@ -49,6 +51,40 @@ export function clearAuth() {
   localStorage.removeItem(USER_KEY);
 }
 
+/* ------------------------------------------------------------ sign-out reason */
+
+const SIGN_OUT_REASON_KEY = 'cip_signout_reason';
+
+export type SignOutReason = 'idle' | 'superseded' | 'expired';
+
+/** Why the session ended, so the login screen can say something more useful than "expired". */
+export function setLastSignOutReason(reason: SignOutReason) {
+  try {
+    localStorage.setItem(SIGN_OUT_REASON_KEY, reason);
+  } catch {
+    /* storage full or blocked — the message is cosmetic, so ignore */
+  }
+}
+
+/** Read and clear the stored reason. Consumed once so a later manual sign-out is not mislabelled. */
+export function takeSignOutReason(): SignOutReason | null {
+  try {
+    const v = localStorage.getItem(SIGN_OUT_REASON_KEY) as SignOutReason | null;
+    localStorage.removeItem(SIGN_OUT_REASON_KEY);
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+/** Map the API's X-Session-End header onto a reason; defaults to a generic expiry. */
+function readSignOutReason(res: Response): SignOutReason {
+  const header = res.headers?.get?.('X-Session-End');
+  if (header === 'idle') return 'idle';
+  if (header === 'superseded') return 'superseded';
+  return 'expired';
+}
+
 /** SSO bridge: if the URL carries ?sso={ticket} (minted by the legacy CIPPortal
  *  after its own login + MFA), exchange it for a JWT before anything else renders.
  *  Returns a cleanup message or null when no ticket was present. */
@@ -61,7 +97,7 @@ export async function consumeSsoTicket(): Promise<'ok' | 'fail' | 'none'> {
   const clean = window.location.pathname + (params.toString() ? '?' + params.toString() : '') + window.location.hash;
   window.history.replaceState(null, '', clean);
   try {
-    const res = await fetch(apiUrl(`/api/auth/sso?ticket=${encodeURIComponent(ticket)}`));
+    const res = await trackedFetch(apiUrl(`/api/auth/sso?ticket=${encodeURIComponent(ticket)}`));
     const data = await res.json().catch(() => null);
     if (res.ok && data?.valid && data?.user?.token) {
       setAuth(data.user.token, data.user);
@@ -94,11 +130,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(apiUrl(path), { ...options, headers });
+  const res = await trackedFetch(apiUrl(path), { ...options, headers });
 
   if (res.status === 401) {
+    // The server's session check distinguishes "you were idle" from "you signed in
+    // elsewhere"; both arrive here as a bare 401, so read the reason the API attached.
+    const reason = readSignOutReason(res);
     clearAuth();
-    throw new ApiError('Session expired. Please sign in again.', 401);
+    setLastSignOutReason(reason);
+    throw new ApiError(
+      reason === 'superseded'
+        ? 'You have been signed out because this account was signed in somewhere else.'
+        : 'Your session expired after 15 minutes of inactivity. Please sign in again.',
+      401,
+    );
   }
 
   const text = await res.text();
@@ -126,7 +171,7 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
   /** Raw fetch with the JWT attached — for multipart uploads and file downloads. */
   download: (path: string, init?: RequestInit) =>
-    fetch(apiUrl(path), {
+    trackedFetch(apiUrl(path), {
       ...init,
       headers: { ...(init?.headers || {}), Authorization: `Bearer ${getToken()}` },
     }).then(async (res) => {
@@ -141,7 +186,7 @@ export const api = {
       return res.blob();
     }),
   upload: <T = { ok: boolean; docType: string; fileName: string }>(path: string, form: FormData) =>
-    fetch(apiUrl(path), { method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }, body: form }).then(
+    trackedFetch(apiUrl(path), { method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }, body: form }).then(
       async (res) => {
         if (!res.ok) {
           let msg = `Upload failed (${res.status})`;
@@ -158,7 +203,7 @@ export const api = {
 
 /** Download (or open) a PDF report from the backend, carrying the JWT. */
 export async function fetchReportPdf(reportId: number): Promise<Blob> {
-  const res = await fetch(apiUrl(`/api/cibil/download/${reportId}`), {
+  const res = await trackedFetch(apiUrl(`/api/cibil/download/${reportId}`), {
     headers: { Authorization: `Bearer ${getToken()}` },
   });
   if (!res.ok) throw new ApiError('Failed to load PDF', res.status);

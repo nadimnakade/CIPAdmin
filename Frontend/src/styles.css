@@ -1047,6 +1047,36 @@ body {
   margin-top: 4px;
 }
 
+/* ---------- Employee Master edit modal (full master field set) ----------
+   The modal carries ~20 fields, so the body scrolls independently of the
+   header and the sticky action row instead of pushing Save off-screen. */
+.emp-form-scroll {
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.form-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.form-grid textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+@media (max-width: 640px) {
+  .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---------- Dialer Live ---------- */
 .dialer-page .dialer-controls {
   display: flex;
@@ -2239,4 +2269,204 @@ fieldset.form-fields:disabled {
 /* Selection color like highlighter on ledger paper */
 ::selection {
   background: rgba(180, 83, 31, 0.22);
+}
+
+/* ============================================================================
+   Global loading bar, toasts and confirm dialog.
+
+   Added for "loading animation bar on all screens" + "sweet alert". The loading
+   bar is mounted once at the app root and driven by the shared request counter in
+   lib/loading.ts, so it reflects real network activity on every route rather than
+   depending on each page remembering to set a loading flag.
+   ========================================================================== */
+
+/* ---------- Top progress bar ---------- */
+.top-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 200;
+  pointer-events: none;
+  background: rgba(31, 58, 95, 0.08);
+}
+
+.top-progress .top-progress-bar {
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, var(--primary) 0%, var(--action) 50%, var(--primary) 100%);
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.5);
+  transition: transform 0.42s cubic-bezier(0.22, 0.61, 0.36, 1), width 0.42s ease;
+  will-change: transform;
+}
+
+/* Indeterminate sweep while requests are in flight. */
+.top-progress:not(.exiting) .top-progress-bar {
+  animation: cip-progress-sweep 1.15s ease-in-out infinite;
+}
+
+/* Every request settled: run the bar out to the right edge, then fade. */
+.top-progress.exiting .top-progress-bar {
+  width: 100%;
+  transform: translateX(0);
+  opacity: 0;
+  transition: width 0.28s ease-out, opacity 0.32s ease-in 0.1s;
+}
+
+@keyframes cip-progress-sweep {
+  0%   { transform: translateX(-100%); }
+  55%  { transform: translateX(120%); }
+  100% { transform: translateX(275%); }
+}
+
+/* ---------- Toasts ---------- */
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 180;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(380px, calc(100vw - 36px));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  padding: 11px 12px;
+  cursor: pointer;
+  animation: cip-toast-in 0.24s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes cip-toast-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+.toast-success { border-left-color: var(--green); }
+.toast-error   { border-left-color: var(--red); }
+.toast-warn    { border-left-color: var(--amber); }
+.toast-info    { border-left-color: var(--action); }
+
+.toast-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.toast-success .toast-icon { background: var(--green-light); color: var(--green); }
+.toast-error   .toast-icon { background: var(--red-light);   color: var(--red); }
+.toast-warn    .toast-icon { background: var(--amber-light); color: var(--amber); }
+.toast-info    .toast-icon { background: var(--primary-light);color: var(--primary); }
+
+.toast-body { flex: 1; min-width: 0; }
+
+.toast-message {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.toast-detail {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  line-height: 0;
+  flex: 0 0 auto;
+}
+
+.toast-close:hover { background: var(--surface); color: var(--text); }
+
+/* ---------- Confirm dialog (SweetAlert replacement) ---------- */
+.confirm-backdrop {
+  z-index: 220;
+  opacity: 0;
+  transition: opacity 0.16s ease-out;
+}
+
+.confirm-backdrop.in { opacity: 1; }
+
+.confirm-modal {
+  width: 420px;
+  max-width: 92vw;
+  text-align: center;
+  padding: 26px 24px 20px;
+  transform: translateY(10px) scale(0.96);
+  opacity: 0;
+  transition: transform 0.2s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.16s ease-out;
+}
+
+.confirm-backdrop.in .confirm-modal {
+  transform: none;
+  opacity: 1;
+}
+
+.confirm-icon {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-primary .confirm-icon { background: var(--primary-light); color: var(--primary); }
+.confirm-danger .confirm-icon { background: var(--red-light);   color: var(--red); }
+
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-family: var(--font-display);
+  color: var(--ink);
+}
+
+.confirm-text {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.confirm-text p { margin: 0 0 4px; }
+
+.confirm-actions {
+  justify-content: center;
+  margin-top: 18px;
+}
+
+/* Deletes and other irreversible work get stamp-red ink on the yes button. */
+.confirm-danger-btn {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fdfaf3;
+}
+
+.confirm-danger-btn:hover { background: #99291a; }
+
+@media (max-width: 640px) {
+  .toast-stack { right: 10px; left: 10px; bottom: 10px; max-width: none; }
 }

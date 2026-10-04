@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import BsaTransactionExplorer, { type ClassifiedBankTransaction } from '../components/BsaTransactionExplorer';
+import './BsaAnalyzerPage.css';
 
 // ── Types (mirror the backend DTOs, camelCase JSON) ──────────────────────────
 
@@ -21,6 +23,7 @@ interface BsaMeta {
 }
 
 interface BsaAnalysis {
+  transactions?: ClassifiedBankTransaction[];
   accountSummary: {
     totalCredits: number; totalDebits: number; netBalance: number;
     transactionCount: number; period: string; openingBalance: number; closingBalance: number;
@@ -31,13 +34,17 @@ interface BsaAnalysis {
   emiPayments: (BsaMeta & { date: string; description: string; bank: string; bankCategory: string; loanTypeLabel: string; emiAmount: number; month: string; mode: string; loanAccountNumber: string })[];
   otherIncome: { date: string; description: string; amount: number; type: string }[];
   rent: (BsaMeta & { date: string; payee: string; amount: number; description: string; mode: string })[];
-  sipInvestments: (BsaMeta & { date: string; fundName: string; platform: string; amount: number; description: string })[];
+  sipInvestments: (BsaMeta & { date: string; fundName: string; platform: string; amount: number; description: string; investmentType?: string })[];
   insurance: (BsaMeta & { date: string; provider: string; policyType: string; amount: number; description: string })[];
   appLoans: (BsaMeta & { date: string; appName: string; maxApr: number; amount: number; type: string; description: string })[];
   utilities: (BsaMeta & { date: string; description: string; amount: number; category: string })[];
   creditCardPayments: (BsaMeta & { date: string; description: string; amount: number; ccDisplay: string; ccIssuerBank?: string | null; ccChannel?: string | null })[];
   bounceCharges: (BsaMeta & { date: string; description: string; amount: number; category: string; channel?: string | null })[];
-  stockMarket: (BsaMeta & { date: string; direction: string; platform: string; amount: number; description: string })[];
+  stockMarket: (BsaMeta & { date: string; direction: string; platform: string; amount: number; description: string; segment?: string; activity?: string; needsReview?: boolean; classificationReason?: string })[];
+  securities: (BsaMeta & {
+    date: string; description: string; direction: string;
+    platform: string; instrument: string; amount: number; activity?: string;
+  })[];
   apyPension: (BsaMeta & { date: string; description: string; amount: number })[];
   govtSchemeCredits: { date: string; description: string; amount: number; schemeName: string; type: string }[];
   otherDebits: { date: string; description: string; amount: number }[];
@@ -132,7 +139,7 @@ function DataTable({ columns, rows }: { columns: Column[]; rows: Record<string, 
             <tr key={i}>
               {columns.map((c) => (
                 <td key={c.key} style={c.money || c.num ? { textAlign: 'right', whiteSpace: 'nowrap' } : undefined}>
-                  {c.money ? fmtMoney(r[c.key] as number) : c.num ? fmtNum(r[c.key] as number) : String(r[c.key] ?? '')}
+                  {c.money ? fmtMoney(r[c.key] as number) : c.num ? fmtNum(r[c.key] as number) : typeof r[c.key] === 'boolean' ? (r[c.key] ? 'Yes' : 'No') : String(r[c.key] ?? '')}
                 </td>
               ))}
             </tr>
@@ -146,12 +153,21 @@ function DataTable({ columns, rows }: { columns: Column[]; rows: Record<string, 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 
 const MAIN_TABS = [
-  'Summary', 'Monthly', 'Salary', 'Loans (EMI)', 'Disbursements', 'Credit Card',
-  'App Loans', 'Bounces', 'Rent', 'SIP', 'Insurance', 'Utilities',
+  'Transactions', 'Monthly', 'Salary', 'Loans (EMI)', 'Disbursements', 'Credit Card', 'Rent', 'SIP / MF', 'Insurance',
 ] as const;
 const MORE_TABS = [
-  'Stock Market', 'APY Pension', 'Other Income', 'Other Debits', 'Insights', 'CIBIL', 'Underwriting',
+  'Summary', 'Securities', 'Stock Market', 'App Loans', 'Bounces', 'Utilities',
+  'APY Pension', 'Other Income', 'Other Debits', 'Insights', 'CIBIL', 'Underwriting',
 ] as const;
+const TAB_ICONS: Record<string, string> = {
+  Transactions: 'dashboard', Monthly: 'barChart', Salary: 'briefcase', 'Loans (EMI)': 'wallet',
+  Disbursements: 'download', 'Credit Card': 'wallet', Rent: 'briefcase', 'SIP / MF': 'trendingUp', Insurance: 'shield',
+};
+const TAB_TONES: Record<string, string> = {
+  Salary: 'green', 'Loans (EMI)': 'red', Disbursements: 'purple', 'Credit Card': 'amber',
+  Rent: 'blue', 'SIP / MF': 'green', Insurance: 'blue',
+};
+const TAB_LABELS: Record<string, string> = { Transactions: 'All Transactions', Monthly: 'Monthly Summary' };
 type Tab = (typeof MAIN_TABS)[number] | (typeof MORE_TABS)[number];
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -165,7 +181,9 @@ export default function BsaAnalyzerPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [result, setResult] = useState<BsaResponse | null>(null);
-  const [tab, setTab] = useState<Tab>('Summary');
+  const [tab, setTab] = useState<Tab>('Transactions');
+  const [exporting, setExporting] = useState(false);
+  const [guidelinesOpen, setGuidelinesOpen] = useState(false);
   const [openMore, setOpenMore] = useState(false);
   const [history, setHistory] = useState<BsaHistoryEntry[]>(() => loadHistory());
   const [showHistory, setShowHistory] = useState(false);
@@ -180,10 +198,16 @@ export default function BsaAnalyzerPage() {
       const form = new FormData();
       form.append('statement', statement);
       if (cibil) form.append('cibil', cibil);
-      if (cibilPassword.trim()) form.append('cibilPassword', cibilPassword.trim());
+      if (cibilPassword.trim()) {
+        // The field is already labelled "PDF password (if protected)", so apply it to
+        // the bank statement too — previously an encrypted statement could not be
+        // opened at all from this screen.
+        form.append('cibilPassword', cibilPassword.trim());
+        form.append('statementPassword', cibilPassword.trim());
+      }
       const res = await api.upload<BsaResponse>('/api/bsa/analyze', form);
       setResult(res);
-      setTab('Summary');
+      setTab('Transactions');
       setNotice(
         `Analyzed ${res.transactionCount} transactions from ${res.filename}` +
         (res.cibil ? ' with CIBIL report' : ''),
@@ -219,7 +243,7 @@ export default function BsaAnalyzerPage() {
 
   const openHistoryEntry = (entry: BsaHistoryEntry) => {
     setResult(entry.result);
-    setTab('Summary');
+    setTab('Transactions');
     setShowHistory(false);
     setError('');
     setNotice(`Loaded saved analysis of ${entry.filename} (${new Date(entry.savedAt).toLocaleString()}).`);
@@ -237,6 +261,14 @@ export default function BsaAnalyzerPage() {
   const tables = useMemo(() => {
     if (!a) return [] as { id: Tab; columns: Column[]; rows: Record<string, unknown>[] }[];
     return [
+      { id: 'Transactions' as const, columns: [
+        { key: 'date', label: 'Date' }, { key: 'description', label: 'Narration' },
+        { key: 'debit', label: 'Debit', money: true }, { key: 'credit', label: 'Credit', money: true },
+        { key: 'balance', label: 'Balance', money: true }, { key: 'category', label: 'Nature' },
+        { key: 'counterparty', label: 'Counterparty' }, { key: 'instrument', label: 'Instrument / Segment' },
+        { key: 'activity', label: 'Activity' }, { key: 'needsReview', label: 'Review needed' },
+        { key: 'classificationReason', label: 'Basis / Limitation' },
+      ], rows: (a.transactions ?? []) as unknown as Record<string, unknown>[] },
       { id: 'Monthly' as const, columns: [
         { key: 'month', label: 'Month' }, { key: 'credits', label: 'Credits', money: true },
         { key: 'debits', label: 'Debits', money: true }, { key: 'salary', label: 'Salary', money: true },
@@ -252,6 +284,7 @@ export default function BsaAnalyzerPage() {
         { key: 'date', label: 'Date' }, { key: 'bank', label: 'Lender' },
         { key: 'bankCategory', label: 'Category' }, { key: 'loanTypeLabel', label: 'Loan Type' },
         { key: 'loanAccountNumber', label: 'Loan A/c' }, { key: 'mode', label: 'Mode' },
+        { key: 'description', label: 'Description' },
         { key: 'emiAmount', label: 'EMI', money: true },
       ], rows: a.emiPayments as unknown as Record<string, unknown>[] },
       { id: 'Disbursements' as const, columns: [
@@ -279,10 +312,17 @@ export default function BsaAnalyzerPage() {
         { key: 'date', label: 'Date' }, { key: 'payee', label: 'Payee' },
         { key: 'description', label: 'Description' }, { key: 'amount', label: 'Amount', money: true },
       ], rows: a.rent as unknown as Record<string, unknown>[] },
-      { id: 'SIP' as const, columns: [
+      { id: 'SIP / MF' as const, columns: [
         { key: 'date', label: 'Date' }, { key: 'platform', label: 'Platform' },
-        { key: 'fundName', label: 'Fund' }, { key: 'amount', label: 'Amount', money: true },
+        { key: 'fundName', label: 'Fund' }, { key: 'investmentType', label: 'Investment type' },
+        { key: 'amount', label: 'Amount', money: true },
       ], rows: a.sipInvestments as unknown as Record<string, unknown>[] },
+      { id: 'Securities' as const, columns: [
+        { key: 'date', label: 'Date' }, { key: 'direction', label: 'Direction' },
+        { key: 'instrument', label: 'Instrument' }, { key: 'platform', label: 'Rail' },
+        { key: 'activity', label: 'Activity' },
+        { key: 'description', label: 'Description' }, { key: 'amount', label: 'Amount', money: true },
+      ], rows: (a.securities ?? []) as unknown as Record<string, unknown>[] },
       { id: 'Insurance' as const, columns: [
         { key: 'date', label: 'Date' }, { key: 'provider', label: 'Provider' },
         { key: 'policyType', label: 'Type' }, { key: 'description', label: 'Description' },
@@ -294,7 +334,9 @@ export default function BsaAnalyzerPage() {
       ], rows: a.utilities as unknown as Record<string, unknown>[] },
       { id: 'Stock Market' as const, columns: [
         { key: 'date', label: 'Date' }, { key: 'platform', label: 'Platform' },
-        { key: 'direction', label: 'Direction' }, { key: 'description', label: 'Description' },
+        { key: 'direction', label: 'Direction' }, { key: 'segment', label: 'Segment' },
+        { key: 'activity', label: 'Activity' }, { key: 'needsReview', label: 'Review needed' },
+        { key: 'classificationReason', label: 'Basis / Limitation' }, { key: 'description', label: 'Description' },
         { key: 'amount', label: 'Amount', money: true },
       ], rows: a.stockMarket as unknown as Record<string, unknown>[] },
       { id: 'APY Pension' as const, columns: [
@@ -320,9 +362,11 @@ export default function BsaAnalyzerPage() {
 
   // ── Export to Excel ─────────────────────────────────────────────
   const exportExcel = async () => {
-    if (!result || !a) return;
+    if (!result || !a || exporting) return;
+    setExporting(true);
     const rows: string[][] = [];
     rows.push(['Bank Statement Analysis']);
+    rows.push(['Classification is based on bank narration. Broker funding/payout is not proof of a buy, sell, trade profit, or F&O segment. Verify with contract notes or broker ledger.']);
     rows.push([`File: ${result.filename}`]);
     rows.push([`Period: ${a.accountSummary.period}`]);
     rows.push([`Generated: ${new Date().toLocaleString()}`]);
@@ -345,7 +389,7 @@ export default function BsaAnalyzerPage() {
       if (!t.rows.length) continue;
       rows.push([t.id]);
       rows.push(t.columns.map((c) => c.label));
-      for (const r of t.rows) rows.push(t.columns.map((c) => String(r[c.key] ?? '')));
+      for (const r of t.rows) rows.push(t.columns.map((c) => typeof r[c.key] === 'boolean' ? (r[c.key] ? 'Yes' : 'No') : String(r[c.key] ?? '')));
       rows.push([]);
     }
 
@@ -410,6 +454,8 @@ export default function BsaAnalyzerPage() {
       setNotice('Excel report downloaded.');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Export failed.');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -428,30 +474,61 @@ export default function BsaAnalyzerPage() {
     ...(u ? [{ icon: 'check', tone: 'purple', label: 'Underwriting Grade', value: u.grade, sub: u.cibilScore != null ? `Score ${u.cibilScore}` : undefined }] : []),
   ] : [];
 
+  const transactions = a?.transactions;
+  const peaks = useMemo(() => {
+    let highestCredit: ClassifiedBankTransaction | undefined;
+    let highestDebit: ClassifiedBankTransaction | undefined;
+    for (const transaction of transactions ?? []) {
+      if (transaction.credit > 0 && (!highestCredit || transaction.credit > highestCredit.credit)) highestCredit = transaction;
+      if (transaction.debit > 0 && (!highestDebit || transaction.debit > highestDebit.debit)) highestDebit = transaction;
+    }
+    return { highestCredit, highestDebit };
+  }, [transactions]);
+  const overviewCards = a ? [
+    { icon: 'total', tone: 'blue', label: 'Total Transactions', value: fmtNum(a.accountSummary.transactionCount), sub: 'In the uploaded statement' },
+    { icon: 'download', tone: 'green', label: 'Total Credits', value: fmtMoney(a.accountSummary.totalCredits), sub: 'Money received' },
+    { icon: 'upload', tone: 'red', label: 'Total Debits', value: fmtMoney(a.accountSummary.totalDebits), sub: 'Money paid out' },
+    { icon: 'barChart', tone: 'blue', label: 'Highest Credit', value: peaks.highestCredit ? fmtMoney(peaks.highestCredit.credit) : '—', sub: peaks.highestCredit ? `${peaks.highestCredit.category} · ${peaks.highestCredit.date}` : 'No credit transaction details' },
+    { icon: 'barChart', tone: 'red', label: 'Highest Debit', value: peaks.highestDebit ? fmtMoney(peaks.highestDebit.debit) : '—', sub: peaks.highestDebit ? `${peaks.highestDebit.category} · ${peaks.highestDebit.date}` : 'No debit transaction details' },
+  ] : [];
+  const fileSize = (file: File) => file.size >= 1024 * 1024 ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(file.size / 1024))} KB`;
   const pickFile = (which: 'stmt' | 'cibil') => (files: FileList | null) => {
     const f = files?.[0];
-    if (!f) return;
+    if (!f || busy) return;
+    const extension = f.name.split('.').pop()?.toLowerCase();
+    const supported = which === 'stmt' ? ['pdf', 'csv', 'xlsx', 'xls', 'txt'] : ['pdf', 'txt'];
+    if (!extension || !supported.includes(extension)) {
+      setError(which === 'stmt' ? 'Choose a PDF, CSV, XLSX, XLS or TXT bank statement.' : 'Choose a PDF or TXT CIBIL report.');
+      return;
+    }
+    if (f.size === 0 || f.size > 25 * 1024 * 1024) { setError('Choose a non-empty file up to 25 MB.'); return; }
+    setError('');
     if (which === 'stmt') setStatement(f);
     else setCibil(f);
   };
 
   return (
-    <div className="">
+    <div className="bsa-workspace">
       <div className="bsa-head">
         <div className="bsa-head-left">
           <div className="bsa-head-icon"><Icon name="fileText" size={26} /></div>
           <div>
-            <h1>Cibil & Bank Statement Analyzer</h1>
-            <p className="muted">Upload a bank statement (and optionally a CIBIL report) — rule-based analysis: salary, EMIs, loans, bounces, FOIR and underwriting grade.</p>
+            <h1>CIBIL &amp; Bank Statement Analyzer</h1>
+            <p className="muted">Upload a bank statement (and optionally a CIBIL report) — rule-based transaction classification: salary, EMIs, mutual funds, insurance, investments, equity/F&O activity and credit-card payments.</p>
           </div>
         </div>
-        <button className="btn bsa-history-btn" onClick={() => setShowHistory((v) => !v)}>
-          <Icon name="clock" size={16} /> Analysis History
-        </button>
+        <div className="bsa-head-actions">
+          <button className="btn bsa-history-btn" aria-expanded={showHistory} onClick={() => setShowHistory((v) => !v)}>
+            <Icon name="clock" size={15} /> Analysis History
+          </button>
+          <button className="btn primary" disabled={!result || busy || exporting} onClick={exportExcel}>
+            <Icon name="download" size={15} /> {exporting ? 'Exporting…' : 'Export to Excel'}
+          </button>
+        </div>
       </div>
 
-      {error && <div className="alert error">{error}</div>}
-      {notice && <div className="alert success">{notice}</div>}
+      {error && <div className="alert error" role="alert"><Icon name="alert" size={17} /><span>{error}</span><button className="icon-btn" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={14} /></button></div>}
+      {notice && <div className="bsa-status-banner" role="status"><Icon name="check" size={21} /><strong>{notice}</strong><span>Review the classification below.</span><button className="icon-btn" aria-label="Dismiss notification" onClick={() => setNotice('')}><Icon name="close" size={14} /></button></div>}
 
       {showHistory && (
         <div className="panel bsa-history-panel">
@@ -491,64 +568,72 @@ export default function BsaAnalyzerPage() {
 
       <div className="panel bsa-upload-panel">
         <div className="bsa-panel-head">
-          <div className="bsa-panel-title"><span className="bsa-title-icon"><Icon name="upload" size={13} /></span> Upload Files</div>
-          {result && (
-            <button className="btn small" onClick={exportExcel}><Icon name="download" size={14} /> Export to Excel</button>
-          )}
+          <div className="bsa-panel-title"><span className="bsa-title-icon"><Icon name="upload" size={19} /></span><div><strong>Upload Files</strong><small>Bank statement (PDF / CSV / XLSX / TXT, ≤ 25 MB) and optional CIBIL report</small></div></div>
+          <button className="bsa-guidelines-btn" aria-expanded={guidelinesOpen} aria-controls="bsa-guidelines" onClick={() => setGuidelinesOpen(v => !v)}><Icon name="help" size={14} /> Supported formats &amp; guidelines</button>
         </div>
+        {guidelinesOpen && <div className="bsa-guidelines" id="bsa-guidelines">
+          <strong>Use a text-based statement or a netbanking export.</strong>
+          <p>Bank statement: PDF, CSV, XLSX, XLS or TXT. CIBIL report: PDF or TXT. Each file must be non-empty and at most 25 MB; the combined upload must fit the API's 25 MB request limit. Scanned/image-only PDFs require a text-based export.</p>
+          <p>The password is tried for both PDFs. If their passwords differ, unlock one before uploading. Categories use bank narration, not verified trades or obligations. Broker funding/payout does not prove share purchases, sales or profit; check contract notes and review uncertain entries.</p>
+        </div>}
         <div className="bsa-upload-grid">
           <div className="field">
-            <label>Bank statement * (PDF / CSV / XLSX / TXT, ≤ 25 MB)</label>
             <div
-              className={'bsa-drop' + (dragOver === 'stmt' ? ' over' : '')}
-              onClick={() => stmtRef.current?.click()}
+              className={'bsa-drop' + (statement ? ' has-file' : '') + (dragOver === 'stmt' ? ' over' : '')}
+              role="button" tabIndex={busy ? -1 : 0} aria-label="Choose bank statement" aria-disabled={busy}
+              onKeyDown={e => { if (!busy && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); stmtRef.current?.click(); } }}
+              onClick={() => { if (!busy) stmtRef.current?.click(); }}
               onDragOver={(e) => { e.preventDefault(); setDragOver('stmt'); }}
               onDragLeave={() => setDragOver(null)}
               onDrop={(e) => { e.preventDefault(); setDragOver(null); pickFile('stmt')(e.dataTransfer.files); }}
             >
-              <div className="bsa-drop-icon"><Icon name="fileText" size={16} /></div>
+              <div className="bsa-drop-icon"><Icon name="fileText" size={22} /></div>
               <div className="bsa-drop-text">
-                <span className="bsa-drop-hint"><b>Choose File</b> or drag &amp; drop</span>
-                {statement && <span className="bsa-drop-file" title={statement.name}>{statement.name}</span>}
+                <strong className="bsa-upload-label">Bank Statement <span>*</span></strong>
+                {statement ? <span className="bsa-drop-file" title={statement.name}><Icon name="fileText" size={12} />{statement.name}</span> : <span className="bsa-drop-hint">Choose file or drag &amp; drop</span>}
+                <small>{statement ? `${statement.name.split('.').pop()?.toUpperCase()} · ${fileSize(statement)}` : 'PDF / CSV / XLSX / TXT · ≤ 25 MB'}</small>
               </div>
+              {statement && <span className="bsa-file-ready" title="File selected (not yet validated by analysis)"><Icon name="check" size={18} /></span>}
               {statement && (
-                <button className="icon-btn bsa-drop-x" title="Remove" onClick={(e) => { e.stopPropagation(); setStatement(null); if (stmtRef.current) stmtRef.current.value = ''; }}>
+                <button className="icon-btn bsa-drop-x" aria-label="Remove bank statement" disabled={busy} onKeyDown={e => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); setStatement(null); if (stmtRef.current) stmtRef.current.value = ''; }}>
                   <Icon name="close" size={12} />
                 </button>
               )}
-              <input ref={stmtRef} type="file" accept=".pdf,.csv,.xlsx,.xls,.txt" hidden
+              <input ref={stmtRef} type="file" accept=".pdf,.csv,.xlsx,.xls,.txt" disabled={busy} hidden
                 onChange={(e) => pickFile('stmt')(e.target.files)} />
             </div>
           </div>
           <div className="field">
-            <label>CIBIL report (optional — PDF / TXT)</label>
             <div
-              className={'bsa-drop' + (dragOver === 'cibil' ? ' over' : '')}
-              onClick={() => cibilRef.current?.click()}
+              className={'bsa-drop' + (cibil ? ' has-file' : '') + (dragOver === 'cibil' ? ' over' : '')}
+              role="button" tabIndex={busy ? -1 : 0} aria-label="Choose CIBIL report" aria-disabled={busy}
+              onKeyDown={e => { if (!busy && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); cibilRef.current?.click(); } }}
+              onClick={() => { if (!busy) cibilRef.current?.click(); }}
               onDragOver={(e) => { e.preventDefault(); setDragOver('cibil'); }}
               onDragLeave={() => setDragOver(null)}
               onDrop={(e) => { e.preventDefault(); setDragOver(null); pickFile('cibil')(e.dataTransfer.files); }}
             >
-              <div className="bsa-drop-icon"><Icon name="fileText" size={16} /></div>
+              <div className="bsa-drop-icon"><Icon name="fileText" size={22} /></div>
               <div className="bsa-drop-text">
-                <span className="bsa-drop-hint"><b>Choose File</b> or drag &amp; drop</span>
-                {cibil && <span className="bsa-drop-file" title={cibil.name}>{cibil.name}</span>}
+                <strong className="bsa-upload-label">CIBIL Report <em>(optional)</em></strong>
+                {cibil ? <span className="bsa-drop-file" title={cibil.name}><Icon name="fileText" size={12} />{cibil.name}</span> : <span className="bsa-drop-hint">Choose file or drag &amp; drop</span>}
+                <small>{cibil ? `${cibil.name.split('.').pop()?.toUpperCase()} · ${fileSize(cibil)}` : 'PDF / TXT · ≤ 25 MB'}</small>
               </div>
               {cibil && (
-                <button className="icon-btn bsa-drop-x" title="Remove" onClick={(e) => { e.stopPropagation(); setCibil(null); if (cibilRef.current) cibilRef.current.value = ''; }}>
+                <button className="icon-btn bsa-drop-x" aria-label="Remove CIBIL report" disabled={busy} onKeyDown={e => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); setCibil(null); if (cibilRef.current) cibilRef.current.value = ''; }}>
                   <Icon name="close" size={12} />
                 </button>
               )}
-              <input ref={cibilRef} type="file" accept=".pdf,.txt" hidden
+              <input ref={cibilRef} type="file" accept=".pdf,.txt" disabled={busy} hidden
                 onChange={(e) => pickFile('cibil')(e.target.files)} />
             </div>
           </div>
-          <div className="field">
-            <label>PDF password (if protected)</label>
+          <div className="field bsa-password-card">
+            <label htmlFor="bsa-pdf-password"><Icon name="lock" size={18} /><span>PDF Password <small>(if file is protected)</small></span></label>
             <div className="bsa-pwd">
-              <input type={showPwd ? 'text' : 'password'} placeholder="Password" value={cibilPassword}
+              <input id="bsa-pdf-password" type={showPwd ? 'text' : 'password'} placeholder="Enter PDF password" autoComplete="off" disabled={busy} value={cibilPassword}
                 onChange={(e) => setCibilPassword(e.target.value)} />
-              <button className="icon-btn" title={showPwd ? 'Hide password' : 'Show password'} onClick={() => setShowPwd((v) => !v)}>
+              <button className="icon-btn" aria-label={showPwd ? 'Hide password' : 'Show password'} onClick={() => setShowPwd((v) => !v)}>
                 <Icon name="eye" size={15} />
               </button>
             </div>
@@ -563,22 +648,24 @@ export default function BsaAnalyzerPage() {
           </div>
         </div>
 
+      </div>
+
         {result && (
           <div className="bsa-tabs-row">
             <div className="bsa-tabs">
               {MAIN_TABS.map((t) => (
-                <button key={t} className={`bsa-tab${tab === t ? ' active' : ''}`} onClick={() => setTab(t)}>
-                  {t}
+                <button key={t} className={`bsa-tab ${TAB_TONES[t] ?? 'neutral'}${tab === t ? ' active' : ''}`} aria-pressed={tab === t} onClick={() => { setTab(t); setOpenMore(false); }}>
+                  <Icon name={TAB_ICONS[t]} size={15} />{TAB_LABELS[t] ?? t}
                 </button>
               ))}
               <div className="bsa-more">
-                <button className={`bsa-tab${moreActive ? ' active' : ''}`} onClick={() => setOpenMore((v) => !v)}>
+                <button className={`bsa-tab neutral${moreActive ? ' active' : ''}`} aria-expanded={openMore} onClick={() => setOpenMore((v) => !v)} onKeyDown={e => { if (e.key === 'Escape') setOpenMore(false); }}>
                   {(moreActive ? tab : 'More')} <Icon name="chevronDown" size={12} />
                 </button>
                 {openMore && (
                   <div className="bsa-more-menu">
                     {MORE_TABS.map((t) => (
-                      <button key={t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); setOpenMore(false); }}>
+                      <button key={t} aria-pressed={tab === t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); setOpenMore(false); }}>
                         {t}
                       </button>
                     ))}
@@ -588,10 +675,17 @@ export default function BsaAnalyzerPage() {
             </div>
           </div>
         )}
-      </div>
+
+      {result && a && <>
+        <div className="bsa-overview-cards">
+          {overviewCards.map(card => <div key={card.label} className="bsa-card"><div className={`bsa-card-icon tone-${card.tone}`}><Icon name={card.icon} size={22} /></div><div className="bsa-card-body"><span className="bsa-card-label">{card.label}</span><strong>{card.value}</strong><span className="bsa-card-sub" title={card.sub}>{card.sub}</span></div></div>)}
+        </div>
+        <div className="bsa-classification-note"><Icon name="help" size={14} /><span>Categories are narration-based. Broker transfers are not proof of trades or profit. Review flagged entries against supporting records.</span><span className="bsa-period"><Icon name="calendar" size={13} />{a.accountSummary.period}</span></div>
+      </>}
 
       {result && a && (
-        <div className="panel">
+        <div className={tab === 'Transactions' ? 'bsa-result-area' : 'panel bsa-section-panel'}>
+          {tab === 'Transactions' && (transactions?.length ? <BsaTransactionExplorer key={`${result.filename}-${result.transactionCount}-${a.accountSummary.totalCredits}-${a.accountSummary.totalDebits}`} transactions={transactions} monthlySummary={a.monthlySummary} totalDebits={a.accountSummary.totalDebits} /> : <div className="bsa-empty-state"><Icon name="fileText" size={32} /><h2>No transaction details available</h2><p>This saved analysis predates the transaction register. Re-upload the statement to populate it, or view the existing category tabs.</p></div>)}
           {tab === 'Summary' && (
             <div className="bsa-summary">
               <div className="bsa-cards">
@@ -821,11 +915,12 @@ export default function BsaAnalyzerPage() {
             </div>
           )}
 
-          {tables.filter((t) => t.id === tab).map((t) => (
-            <DataTable key={t.id} columns={t.columns} rows={t.rows} />
+          {tables.filter((t) => t.id === tab && tab !== 'Transactions').map((t) => (
+            <div key={t.id}><div className="bsa-section-heading"><h2>{TAB_LABELS[t.id] ?? t.id} <span>({t.rows.length})</span></h2><span>Full statement · included in Excel export</span></div><DataTable columns={t.columns} rows={t.rows} /></div>
           ))}
         </div>
       )}
+      {!result && <div className="bsa-empty-state"><span className="bsa-empty-icon"><Icon name="barChart" size={30} /></span><h2>Your statement, at a glance</h2><p>Upload a bank statement to explore transactions, income, obligations and investment activity in one place.</p><div><span><Icon name="briefcase" size={14} />Salary &amp; EMIs</span><span><Icon name="trendingUp" size={14} />Investments &amp; trading</span><span><Icon name="wallet" size={14} />Credit-card payments</span></div></div>}
     </div>
   );
 }

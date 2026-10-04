@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, setAuth, clearAuth, AuthUser, ApiError } from '../api';
+import { api, setAuth, clearAuth, takeSignOutReason, AuthUser, ApiError } from '../api';
 import Icon from '../components/Icon';
 
 interface UserSessionDto {
@@ -40,6 +40,9 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [noAccess, setNoAccess] = useState(false);
+  // Set when the app signs the user out on purpose (idle timeout, or a second login
+  // elsewhere), so the card can explain itself instead of looking like a random expiry.
+  const [signedOut, setSignedOut] = useState('');
 
   const [step, setStep] = useState<'credentials' | 'otp'>('credentials');
   const [otp, setOtp] = useState('');
@@ -51,7 +54,18 @@ export default function LoginPage() {
       clearAuth();
       window.history.replaceState(null, '', '/login');
     }
+
+    const reason = takeSignOutReason();
+    if (reason === 'idle')
+      setSignedOut('You were signed out after 15 minutes of inactivity.');
+    else if (reason === 'superseded')
+      setSignedOut('You were signed out because this account was signed in somewhere else.');
   }, []);
+
+  // Any typing means the user is back; drop the notice rather than leaving it to go stale.
+  useEffect(() => {
+    if (signedOut && (username || password)) setSignedOut('');
+  }, [username, password, signedOut]);
 
   const submitCredentials = async (e: FormEvent) => {
     e.preventDefault();
@@ -169,6 +183,8 @@ export default function LoginPage() {
               <div className="alert warn no-access" role="alert">{NO_ACCESS_MSG}</div>
             ) : error ? (
               <div className="alert error">{error}</div>
+            ) : signedOut ? (
+              <div className="alert warn" role="status">{signedOut}</div>
             ) : null}
             <button className="btn primary full" disabled={loading}>
               {loading ? 'Signing in…' : 'Sign In'}
@@ -192,6 +208,8 @@ export default function LoginPage() {
               <div className="alert warn no-access" role="alert">{NO_ACCESS_MSG}</div>
             ) : error ? (
               <div className="alert error">{error}</div>
+            ) : signedOut ? (
+              <div className="alert warn" role="status">{signedOut}</div>
             ) : null}
             <button className="btn primary full" disabled={loading || otp.length !== 6}>
               {loading ? 'Verifying…' : 'Verify & Sign In'}

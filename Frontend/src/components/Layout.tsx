@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { getUser, clearAuth } from '../api';
+import { getUser, clearAuth, setLastSignOutReason } from '../api';
 import Icon from './Icon';
+import IdleWarningDialog from './IdleWarning';
+import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useMenus, type NavGroup } from './useMenus';
 
 const isAdminUser = () => {
@@ -14,6 +16,7 @@ const BREADCRUMBS: Record<string, string[]> = {
   '/': ['Dashboard'],
   '/cibil': ['CIBIL', 'Checker'],
   '/bsa-analyzer': ['CIBIL', 'Bank Statement Analyzer'],
+  '/financial-analysis': ['CIBIL', 'Financial Analysis'],
   '/employees': ['Employees', 'DID Management'],
   '/employee-master': ['Masters', 'Employee Master'],
   '/company-categories': ['Masters', 'Company Category'],
@@ -63,6 +66,13 @@ export default function Layout() {
     clearAuth();
     navigate('/login', { replace: true });
   };
+
+  // 15-minute idle sign-out. The server drops the session row at the same deadline;
+  // this stops an untouched tab from continuing to display data that is already invalid.
+  const idleWarning = useIdleTimeout(() => {
+    setLastSignOutReason('idle');
+    navigate('/login', { replace: true });
+  });
 
   // Topbar user-chip dropdown (Sign out lives directly on screen).
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -309,6 +319,7 @@ export default function Layout() {
           <Outlet />
         </div>
       </main>
+      <IdleWarningDialog warning={idleWarning} />
     </div>
   );
 }

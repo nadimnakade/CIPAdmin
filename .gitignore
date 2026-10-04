@@ -1,6 +1,47 @@
-Backend/publish/
-Backend/bin
-Frontend/node_modules/
-*.dll
-*.exe
-Frontend/dist
+# ---- Build output / publish folders (never committed) ----
+# Frontend (Vite) production bundle
+/Frontend/dist/
+/Frontend/dist-*/
+/Frontend/.vite/
+
+# Backend (dotnet) build + publish output
+/Backend/bin/
+/Backend/obj/
+/Backend/publish/
+/Backend/out/
+/tools-bsatest/bin/
+/tools-bsatest/obj/
+
+# Frontend production bundle copied into the backend for single-app hosting
+/Backend/wwwroot/assets/
+/Backend/publish/wwwroot/assets/
+# Backend/wwwroot/web.config and Backend/wwwroot/index.html stay tracked on purpose:
+# web.config is hand-written IIS configuration, index.html is the SPA entry point.
+
+# ---- Dependencies ----
+**/node_modules/
+**/packages/
+
+# ---- Logs and local runtime files ----
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# ---- TypeScript / tooling caches ----
+*.tsbuildinfo
+.eslintcache
+
+# ---- OS / editor noise ----
+Thumbs.db
+.DS_Store
+desktop.ini
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ---- Uploaded / generated user data ----
+/Backend/pdf files/
+/Backend/ocr uploads/
+/Backend/uploads/

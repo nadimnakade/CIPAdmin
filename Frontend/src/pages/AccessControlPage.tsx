@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
 import Icon from '../components/Icon';
+import { confirmAction } from '../lib/confirm';
+import { toast } from '../lib/toast';
 import { Pager } from '../components/tableView';
 
 interface AccessRow {
@@ -28,7 +30,6 @@ export default function AccessControlPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busyCode, setBusyCode] = useState<number | null>(null);
-  const [notice, setNotice] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,12 +63,18 @@ export default function AccessControlPage() {
 
   const setAccessFlag = async (r: AccessRow, hasAccess: boolean) => {
     const verb = hasAccess ? 'Grant' : 'Revoke';
-    if (!confirm(`${verb} website access for "${r.empName || r.empCode}"?`)) return;
+    const name = r.empName || String(r.empCode);
+    const ok = await confirmAction({
+      title: `${verb} website access?`,
+      text: `${name} will ${hasAccess ? 'be able to sign in to the portal' : 'immediately lose access to the portal'}.`,
+      confirmText: verb,
+      tone: hasAccess ? 'primary' : 'danger',
+    });
+    if (!ok) return;
     setBusyCode(r.empCode);
-    setNotice('');
     try {
       await api.put(`/api/access-control/${r.empCode}`, { hasAccess });
-      setNotice(`${verb}ned access for ${r.empName || r.empCode}.`);
+      toast.success(`${verb === 'Grant' ? 'Granted' : 'Revoked'} access for ${name}.`);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : `${verb} failed`);
@@ -77,12 +84,18 @@ export default function AccessControlPage() {
   };
 
   const clearOverride = async (r: AccessRow) => {
-    if (!confirm(`Remove the manual override for "${r.empName || r.empCode}"? The role default will apply again.`)) return;
+    const name = r.empName || String(r.empCode);
+    const ok = await confirmAction({
+      title: `Remove the override for ${name}?`,
+      text: 'The role default will apply to this employee again.',
+      confirmText: 'Remove override',
+      tone: 'danger',
+    });
+    if (!ok) return;
     setBusyCode(r.empCode);
-    setNotice('');
     try {
       await api.delete(`/api/access-control/${r.empCode}`);
-      setNotice(`Override removed — role default applies for ${r.empName || r.empCode}.`);
+      toast.success(`Override removed — role default applies for ${name}.`);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to remove override');
@@ -103,7 +116,6 @@ export default function AccessControlPage() {
         </div>
       </div>
 
-      {notice && <div className="alert success">{notice}</div>}
       {error && <div className="alert error">{error}</div>}
 
       <div className="card">
