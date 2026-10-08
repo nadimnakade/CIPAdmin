@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { getUser, clearAuth, setLastSignOutReason } from '../api';
 import Icon from './Icon';
 import IdleWarningDialog from './IdleWarning';
@@ -28,6 +28,7 @@ const BREADCRUMBS: Record<string, string[]> = {
   '/limit-requests': ['Administration', 'CIBIL Limit Requests'],
   '/menu-master': ['Administration', 'Menu Master'],
   '/role-master': ['Administration', 'Role & Privilege Master'],
+  '/authenticator-setup': ['Administration', 'Authenticator Setup'],
   '/settings': ['Settings'],
 };
 
@@ -160,6 +161,36 @@ export default function Layout() {
 
   const crumbs = BREADCRUMBS[location.pathname] || ['Dashboard'];
 
+  // Every routable path the sidebar knows about, used to decide which single item is
+  // highlighted. react-router's NavLink.isActive is PREFIX based, so with
+  // /applications and /applications/existing-loans both in the menu it reported BOTH as
+  // active and the parent stayed lit across the whole section. Exact match only, with one
+  // deliberate exception: a route that is a descendant of a menu path but is NOT itself a
+  // menu path (e.g. /applications/123, the edit form reached from Search Application)
+  // keeps its parent highlighted, because otherwise the user would land on a page with
+  // nothing lit at all.
+  const menuPaths = useMemo(() => {
+    const all = new Set<string>();
+    const walk = (items: NavGroup[]) => {
+      for (const it of items) {
+        if (it.to && !it.external) all.add(it.to.replace(/\/+$/, '') || '/');
+        if (it.children) walk(it.children);
+      }
+    };
+    walk(nav);
+    return all;
+  }, [nav]);
+
+  const isActivePath = useMemo(() => {
+    const current = location.pathname.replace(/\/+$/, '') || '/';
+    return (to: string) => {
+      const target = to.replace(/\/+$/, '') || '/';
+      if (current === target) return true;
+      // Descendant of a menu path, but no menu entry owns this exact URL.
+      return current.startsWith(target + '/') && !menuPaths.has(current);
+    };
+  }, [location.pathname, menuPaths]);
+
   // Section headings are always expanded — the reference design shows every group open,
   // so the group label is a heading rather than a disclosure toggle. `openGroups` is kept
   // for the rarer third level (a leaf that itself has children), which does collapse.
@@ -200,17 +231,18 @@ export default function Layout() {
         </a>
       );
     }
+    const active = isActivePath(c.to!);
     return (
-      <NavLink
+      <Link
         key={c.to}
         to={c.to!}
-        end={c.end}
-        className={({ isActive }) => 'nav-subitem' + (isActive ? ' active' : '')}
+        className={'nav-subitem' + (active ? ' active' : '')}
+        aria-current={active ? 'page' : undefined}
         title={leafTitle(c.label)}
       >
         <Icon name={c.icon ?? 'fileText'} size={14} />
         <span className="nav-item-label">{c.label}</span>
-      </NavLink>
+      </Link>
     );
   };
 
@@ -224,8 +256,8 @@ export default function Layout() {
             <img src={`${import.meta.env.BASE_URL}assets/logo.png`} alt="" className="brand-img" />
           </span>
           <span className="brand-text">
-            <span className="brand-name">CIBIL Analyzer</span>
-            <span className="brand-sub">Bank &amp; Credit Analysis</span>
+            <span className="brand-name">1UP</span>
+            <span className="brand-sub">Business Management System</span>
           </span>
           <button
             className="icon-btn sidebar-close"
@@ -262,15 +294,15 @@ export default function Layout() {
                   <Icon name={item.icon ?? 'fileText'} /> <span className="nav-item-label">{item.label}</span>
                 </a>
               ) : (
-              <NavLink
+              <Link
                 key={item.label}
                 to={item.to}
-                end={item.end}
-                className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+                className={'nav-item' + (isActivePath(item.to) ? ' active' : '')}
+                aria-current={isActivePath(item.to) ? 'page' : undefined}
                 title={leafTitle(item.label)}
               >
                 <Icon name={item.icon ?? 'fileText'} /> <span className="nav-item-label">{item.label}</span>
-              </NavLink>
+              </Link>
               )
             ) : (
               // Group label is a plain section heading; its children always render.

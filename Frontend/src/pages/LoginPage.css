@@ -498,6 +498,50 @@
   box-shadow: var(--ring);
 }
 
+/* ---------- Authenticator enrollment (QR) ---------- */
+/* Every rule keeps the .login-page ancestor so it beats the legacy 0,1,0 rules
+   in styles.css regardless of import order. */
+
+.login-page .otp-enroll {
+  margin-bottom: 20px;
+}
+
+.login-page .otp-steps {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--c-text-sub);
+}
+
+.login-page .otp-steps li {
+  margin-bottom: 5px;
+}
+
+.login-page .otp-steps b {
+  color: var(--c-ink);
+  font-weight: var(--fw-semi);
+}
+
+.login-page .otp-qr {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background: #ffffff; /* always white: scanners need the light quiet zone */
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+}
+
+.login-page .otp-qr svg {
+  display: block;
+  /* Enrollment is QR-only, so the code has to be comfortably scannable. Let it grow
+     into the space the card actually has (up to 240px, ~5px per module on the 49x49
+     grid this produces) and still shrink on narrow phones because width:100% wins. */
+  width: 100%;
+  max-width: 240px;
+  height: auto;
+}
+
 /* ---------- Footer ---------- */
 
 .login-page .login-footer {

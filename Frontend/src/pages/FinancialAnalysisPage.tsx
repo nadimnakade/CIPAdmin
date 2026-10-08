@@ -598,6 +598,14 @@ export default function BsaAnalyzerPage() {
             </div>
           </div>
           <div className="bsa-upload-actions">
+            {/* Either file alone is valid. Without this the disabled Analyze button
+                gives no reason, and the two "(optional)" labels read as "nothing is
+                required". Say the actual rule: at least one. */}
+            {!statement && !cibil && !busy && (
+              <p className="bsa-need-file" role="status">
+                Required: a bank statement <b>or</b> a CIBIL report.
+              </p>
+            )}
             <button className="btn primary bsa-analyze-btn" disabled={busy || (!statement && !cibil)} onClick={analyze}>
               <Icon name="barChart" size={16} /> {busy ? 'Analyzing…' : 'Analyze'}
             </button>
@@ -793,7 +801,7 @@ export default function BsaAnalyzerPage() {
 
           {tab === 'Underwriting' && (
             <div className="bsa-summary">
-              {!u ? <p className="muted">Upload both a statement and a CIBIL report to see underwriting results.</p> : (
+              {!u ? <p className="muted">Upload a CIBIL report to see underwriting results — a bank statement is optional.</p> : (
                 <>
                   <div className="bsa-cards">
                     <div className="bsa-card">

@@ -18,6 +18,7 @@
 /publish/
 /dist/
 /publish-*/
+/*.zip
 
 # Frontend production bundle copied into the backend for single-app hosting
 /Backend/wwwroot/assets/

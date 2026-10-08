@@ -91,9 +91,32 @@ public class TotpService : ITotpService
 
     public string GenerateSecret()
     {
-        var bytes = RandomNumberGenerator.GetBytes(10); // 80-bit secret, GA standard
-        var sb = new System.Text.StringBuilder();
-        for (int i = 0; i < bytes.Length; i++) sb.Append(Base32Alphabet[bytes[i] & 31]);
+        // 10 random bytes = 80 bits of entropy, which is what Google Authenticator uses.
+        // Those must be encoded as 16 Base32 characters (5 bits per character). Taking one
+        // character per byte instead - bytes[i] & 31 - would throw away 3 bits of each byte
+        // and yield a 10-character / 50-bit secret, far weaker than it looks.
+        var bytes = RandomNumberGenerator.GetBytes(10);
+        return Base32Encode(bytes);
+    }
+
+    /// <summary>Standard Base32 (RFC 4648), no padding - matches the decoder below and
+    /// the otpauth:// secrets that Google Authenticator itself produces.</summary>
+    private static string Base32Encode(byte[] data)
+    {
+        var sb = new System.Text.StringBuilder((data.Length * 8 + 4) / 5);
+        int buffer = 0, bitsLeft = 0;
+        foreach (var b in data)
+        {
+            buffer = (buffer << 8) | b;
+            bitsLeft += 8;
+            while (bitsLeft >= 5)
+            {
+                sb.Append(Base32Alphabet[(buffer >> (bitsLeft - 5)) & 31]);
+                bitsLeft -= 5;
+            }
+        }
+        if (bitsLeft > 0)
+            sb.Append(Base32Alphabet[(buffer << (5 - bitsLeft)) & 31]);
         return sb.ToString();
     }
 

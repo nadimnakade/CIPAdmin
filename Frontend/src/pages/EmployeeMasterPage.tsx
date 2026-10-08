@@ -18,6 +18,7 @@ interface Row {
   doj: string | null;
   contact: string | null;
   isActive: boolean;
+  lastWorkingDate: string | null;
 }
 interface Option { id: number; name: string }
 
@@ -240,6 +241,9 @@ export default function EmployeeMasterPage() {
                       <span className={'badge ' + (r.isActive ? 'green' : 'gray')}>
                         {r.isActive ? 'Active' : 'Inactive'}
                       </span>
+                      {!r.isActive && r.lastWorkingDate && (
+                        <div className="muted-note">Left {r.lastWorkingDate}</div>
+                      )}
                     </td>
                     <td>
                       <div className="row-actions">

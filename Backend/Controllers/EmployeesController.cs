@@ -123,9 +123,10 @@ public class EmployeesController : ControllerBase
     private int RoleId => int.TryParse(User.FindFirst(ClaimTypes.Role)?.Value, out var r) ? r : 0;
     private bool IsAdmin => HierarchyService.IsAdminRole(RoleId);
 
-    /// <summary>Connector role / designation — excluded from employee listings (DID mgmt, pickers).</summary>
-    private const int ConnectorRoleId = 2010;
-    private const int ConnectorDesigId = 1014;
+    /// <summary>Connector role / designation — excluded from employee listings (DID mgmt, pickers).
+    /// Defined once in <see cref="EmployeeFilters"/>.</summary>
+    private const int ConnectorRoleId = EmployeeFilters.ConnectorRoleId;
+    private const int ConnectorDesigId = EmployeeFilters.ConnectorDesigId;
     /// <summary>Only these roles are dialer users: CALLER, TL, TL-OPS (item 2).</summary>
     private const string DialerRolesSql = "5,4,1007";
 
@@ -151,6 +152,7 @@ public class EmployeesController : ControllerBase
     public async Task<ActionResult<List<EmployeeDidDto>>> GetDids([FromQuery] string? search = null, [FromQuery] string? status = null, [FromQuery] int? designationId = null)
     {
         var scopeSql = await ScopeSqlAsync();
+        var notConnector = EmployeeFilters.NotConnector("e");
         var sql = $@"
             SELECT d.DID_ID, d.EMP_CODE, e.EMP_CODE AS EMP_CODE_TEXT, LTRIM(RTRIM(e.EMP_NAME)) AS EMP_NAME,
                    dn.DESIG_NAME, d.DID_NUMBER, d.EXTENSION_NUMBER, d.DID_STATUS, d.ASSIGNED_DATE,
@@ -160,7 +162,7 @@ public class EmployeesController : ControllerBase
             LEFT JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
             WHERE ISNULL(d.IS_DELETED, 0) = 0{scopeSql}
-              AND (d.EMP_CODE IS NULL OR (ISNULL(e.ROLE_ID, 0) IN (5, 4, 1007) AND ISNULL(e.ROLE_ID, 0) <> 2010 AND ISNULL(e.DESIG_ID, 0) <> 1014))";
+              AND (d.EMP_CODE IS NULL OR (ISNULL(e.ROLE_ID, 0) IN (5, 4, 1007) AND {notConnector}))";
         // NOTE: build the FULL SQL before the query call — the bind lambda must only
         // attach parameters (DbContext captures the command text before invoking it).
         if (!string.IsNullOrWhiteSpace(search))
@@ -209,7 +211,9 @@ public class EmployeesController : ControllerBase
     [HttpGet("designations")]
     public async Task<ActionResult<object>> Designations()
     {
-        var dt = await _db.QueryAsync("SELECT DESIG_ID, DESIG_NAME FROM dbo.TBL_CIP_DESIGNATION_MASTER ORDER BY DESIG_NAME");
+        var dt = await _db.QueryAsync(
+            "SELECT DESIG_ID, DESIG_NAME FROM dbo.TBL_CIP_DESIGNATION_MASTER WHERE DESIG_ID <> @connector ORDER BY DESIG_NAME",
+            p => p.AddWithValue("@connector", ConnectorDesigId));
         return Ok(dt.AsEnumerable().Select(r => new { id = r.Field<int>("DESIG_ID"), name = r.Field<string>("DESIG_NAME") }));
     }
 
@@ -218,23 +222,26 @@ public class EmployeesController : ControllerBase
     public async Task<ActionResult<object>> DidStats()
     {
         var scopeSql = await ScopeSqlAsync();
+        var onRoll = EmployeeFilters.Active("e");
+        var notConnector = EmployeeFilters.NotConnector("e");
         var dt = await _db.QueryAsync($@"
             SELECT
-              (SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE ISNULL(e.ACTIVE,0)=1 AND ISNULL(e.IS_DELETED,0)=0{scopeSql}
+              (SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE {onRoll} AND ISNULL(e.IS_DELETED,0)=0 AND {notConnector}{scopeSql}
                  AND ISNULL(e.ROLE_ID,0) IN (5,4,1007)) AS TOTAL_EMP,
               (SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_DID d
                  JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
-                 WHERE ISNULL(d.IS_DELETED,0)=0 AND d.EMP_CODE IS NOT NULL{scopeSql}
+                 WHERE ISNULL(d.IS_DELETED,0)=0 AND d.EMP_CODE IS NOT NULL
+                   AND {EmployeeFilters.NotDeleted("e")} AND {notConnector}{scopeSql}
                    AND ISNULL(e.ROLE_ID,0) IN (5,4,1007)) AS ASSIGNED,
               (SELECT COUNT(DISTINCT d.EMP_CODE) FROM dbo.TBL_CIP_EMPLOYEE_DID d
                  JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
                  WHERE ISNULL(d.IS_DELETED,0)=0 AND d.EMP_CODE IS NOT NULL
-                   AND ISNULL(e.ACTIVE,0)=1 AND ISNULL(e.IS_DELETED,0)=0{scopeSql}
+                   AND {onRoll} AND ISNULL(e.IS_DELETED,0)=0 AND {notConnector}{scopeSql}
                    AND ISNULL(e.ROLE_ID,0) IN (5,4,1007)) AS ACTIVE_EMP,
               (SELECT COUNT(DISTINCT d.EMP_CODE) FROM dbo.TBL_CIP_EMPLOYEE_DID d
                  JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
                  WHERE ISNULL(d.IS_DELETED,0)=0 AND d.EMP_CODE IS NOT NULL
-                   AND ISNULL(e.ACTIVE,0)=1 AND ISNULL(e.IS_DELETED,0)=0
+                   AND {onRoll} AND ISNULL(e.IS_DELETED,0)=0 AND {notConnector}
                    AND ISNULL(e.ROLE_ID,0) IN (5,4,1007)
                    AND ISNULL(d.DID_STATUS,'Active') <> 'Active'{scopeSql}) AS INACTIVE_EMP");
         var r = dt.Rows[0];
@@ -253,6 +260,7 @@ public class EmployeesController : ControllerBase
     public async Task<IActionResult> ExportDids([FromQuery] string? search = null, [FromQuery] string? status = null, [FromQuery] int? designationId = null)
     {
         var scopeSql = await ScopeSqlAsync();
+        var notConnector = EmployeeFilters.NotConnector("e");
         var sql = $@"
             SELECT e.EMP_CODE AS [Employee Code], e.EMP_NAME AS [Employee Name],
                    dn.DESIG_NAME AS [Designation], d.DID_NUMBER AS [SIP Username],
@@ -264,7 +272,7 @@ public class EmployeesController : ControllerBase
             LEFT JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
             WHERE ISNULL(d.IS_DELETED, 0) = 0{scopeSql}
-              AND (d.EMP_CODE IS NULL OR (ISNULL(e.ROLE_ID, 0) IN (5, 4, 1007) AND ISNULL(e.ROLE_ID, 0) <> 2010 AND ISNULL(e.DESIG_ID, 0) <> 1014))";
+              AND (d.EMP_CODE IS NULL OR (ISNULL(e.ROLE_ID, 0) IN (5, 4, 1007) AND {notConnector}))";
         if (!string.IsNullOrWhiteSpace(search))
             sql += " AND (e.EMP_NAME LIKE @q OR CAST(e.EMP_CODE AS VARCHAR(20)) LIKE @q OR d.DID_NUMBER LIKE @q OR d.EXTENSION_NUMBER LIKE @q)";
         if (!string.IsNullOrWhiteSpace(status) && status != "All")
@@ -300,13 +308,15 @@ public class EmployeesController : ControllerBase
         pageSize = Math.Clamp(pageSize, 1, 500);
 
         var scopeSql = await ScopeSqlAsync();
-        var where = " WHERE ISNULL(e.IS_DELETED,0) = 0" + scopeSql;
+        // Connectors never appear in the employee master, and "active" comes from
+        // EmployeeFilters (LAST_WORKING_DATE IS NULL) rather than the stale ACTIVE bit.
+        var where = " WHERE " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e") + scopeSql;
         if (!string.IsNullOrWhiteSpace(search))
             where += " AND (e.EMP_NAME LIKE @q OR CAST(e.EMP_CODE AS VARCHAR(20)) LIKE @q OR ISNULL(e.EMAIL_ID,'') LIKE @q)";
         if (designationId is > 0)
             where += " AND e.DESIG_ID = @dg";
-        if (active == "true") where += " AND ISNULL(e.ACTIVE,0) = 1";
-        else if (active == "false") where += " AND ISNULL(e.ACTIVE,0) = 0";
+        if (active == "true") where += " AND " + EmployeeFilters.Active("e");
+        else if (active == "false") where += " AND " + EmployeeFilters.Inactive("e");
         Action<SqlParameterCollection> bind = p =>
         {
             if (!string.IsNullOrWhiteSpace(search)) p.AddWithValue("@q", "%" + search.Trim() + "%");
@@ -321,18 +331,22 @@ public class EmployeesController : ControllerBase
         var orderBy = (sortBy?.ToLowerInvariant()) switch
         {
             "code" => $"e.EMP_CODE {dir}",
-            "doj" => $"e.DOJ {dir}",
+            "doj" => $"TRY_CONVERT(DATE, e.DOJ, 101) {dir}",
             "designation" => $"dn.DESIG_NAME {dir}",
             "email" => $"e.EMAIL_ID {dir}",
             "location" => $"l.LOC_NAME {dir}",
-            "status" => $"e.ACTIVE {dir}",
+            // LAST_WORKING_DATE is varchar, so ordering the text directly would put
+            // '01/10/2024' before '02/11/2020'. Sort by the derived on-roll flag instead.
+            "status" => $"CASE WHEN {EmployeeFilters.Active("e")} THEN 1 ELSE 0 END {dir}",
             _ => $"e.EMP_NAME {dir}"
         };
 
         var dt = await _db.QueryAsync($@"
             SELECT e.EMP_CODE, CAST(e.EMP_CODE AS VARCHAR(20)) AS EMP_CODE_TEXT, LTRIM(RTRIM(e.EMP_NAME)) AS EMP_NAME,
                    e.DESIG_ID, dn.DESIG_NAME, e.EMAIL_ID, l.LOC_NAME, e.LOCATION_ID, e.DOJ,
-                   e.PERSONAL_CONTACT1, e.ACTIVE
+                   e.PERSONAL_CONTACT1,
+                   CASE WHEN e.LAST_WORKING_DATE IS NULL THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS ACTIVE,
+                   e.LAST_WORKING_DATE
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
             LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
@@ -352,7 +366,8 @@ public class EmployeesController : ControllerBase
             location = r["LOC_NAME"].ToString(),
             doj = r["DOJ"].ToString(),
             contact = r["PERSONAL_CONTACT1"].ToString(),
-            isActive = r["ACTIVE"] != DBNull.Value && Convert.ToBoolean(r["ACTIVE"])
+            isActive = r["ACTIVE"] != DBNull.Value && Convert.ToBoolean(r["ACTIVE"]),
+            lastWorkingDate = r["LAST_WORKING_DATE"] == DBNull.Value ? null : r["LAST_WORKING_DATE"].ToString()
         }).ToList();
 
         return Ok(new { total, rows, scope = await ScopePayloadAsync() });
@@ -371,8 +386,12 @@ public class EmployeesController : ControllerBase
     [HttpGet("roles")]
     public async Task<ActionResult<object>> GetRoles()
     {
-        var dt = await _db.QueryAsync(
-            "SELECT ROLE_ID, LTRIM(RTRIM(ROLE_NAME)) AS ROLE_NAME FROM dbo.TBL_CIP_ROLE_MASTER WHERE ISNULL(ROLE_ACTIVE,1) = 1 ORDER BY ROLE_ID");
+        var dt = await _db.QueryAsync(@"
+            SELECT ROLE_ID, LTRIM(RTRIM(ROLE_NAME)) AS ROLE_NAME
+            FROM dbo.TBL_CIP_ROLE_MASTER
+            WHERE ISNULL(ROLE_ACTIVE,1) = 1 AND ROLE_ID <> @connector
+            ORDER BY ROLE_ID",
+            p => p.AddWithValue("@connector", ConnectorRoleId));
         return Ok(dt.AsEnumerable().Select(r => new { id = r.Field<int>("ROLE_ID"), name = r["ROLE_NAME"].ToString() }));
     }
 
@@ -397,14 +416,16 @@ public class EmployeesController : ControllerBase
                    e.DOJ, e.DOB, e.SALARY, e.EMP_ADDRESS, e.PERSONAL_CONTACT1, e.PERSONAL_CONTACT2,
                    e.OFFICE_CONTACT, e.SALARY_AC_NO, e.BANK_IFSC_CODE, e.BANK_NAME, e.BANK_ACC_NAME,
                    e.PAN_NO, e.AADHAR_NO, e.USER_TYPE, e.CATEGORY,
-                   e.BOSS_CODE, e.REPORTING_MANAGER_ID, e.PRODUCT_KEY, e.ACTIVE,
+                   e.BOSS_CODE, e.REPORTING_MANAGER_ID, e.PRODUCT_KEY,
+                   CASE WHEN e.LAST_WORKING_DATE IS NULL THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS ACTIVE,
+                   e.LAST_WORKING_DATE,
                    e.REFFERED_BY, e.REFERRED_BY_CODE, e.COMPANY, e.CITY, e.LANG_SPOKEN, e.OCCUPATION,
                    dn.DESIG_NAME, r.ROLE_NAME, l.LOC_NAME
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
             LEFT JOIN dbo.TBL_CIP_ROLE_MASTER r ON r.ROLE_ID = e.ROLE_ID
             LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
-            WHERE e.EMP_CODE = @e AND ISNULL(e.IS_DELETED,0) = 0", p => p.AddWithValue("@e", empCode));
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"), p => p.AddWithValue("@e", empCode));
 
         if (dt.Rows.Count == 0) return NotFound(new { error = "Employee not found." });
         var r = dt.Rows[0];
@@ -461,7 +482,8 @@ public class EmployeesController : ControllerBase
             city = S("CITY"),
             langSpoken = S("LANG_SPOKEN"),
             occupation = I("OCCUPATION"),
-            isActive = r["ACTIVE"] != DBNull.Value && Convert.ToBoolean(r["ACTIVE"])
+            isActive = r["ACTIVE"] != DBNull.Value && Convert.ToBoolean(r["ACTIVE"]),
+            lastWorkingDate = S("LAST_WORKING_DATE")
         });
     }
 
@@ -471,6 +493,8 @@ public class EmployeesController : ControllerBase
     {
         if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode))
             return StatusCode(403, new { error = "This employee is outside your team's scope." });
+        if (req.RoleId == ConnectorRoleId || req.DesignationId == ConnectorDesigId)
+            return BadRequest(new { error = "An employee cannot be assigned the CONNECTOR role or designation in CIPAdmin." });
         if (string.IsNullOrWhiteSpace(req.EmployeeName))
             return BadRequest(new { error = "Employee name is required." });
         if (!string.IsNullOrWhiteSpace(req.Email) && !System.Text.RegularExpressions.Regex.IsMatch(req.Email.Trim(), @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
@@ -491,6 +515,13 @@ public class EmployeesController : ControllerBase
             return BadRequest(new { error = "An employee cannot be their own reporting manager." });
         if (req.ReportingManagerId is > 0)
         {
+            var managerEligible = await _db.ScalarAsync(@"
+                SELECT CASE WHEN " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e") + @" THEN 1 ELSE 0 END
+                FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @mgr",
+                p => p.AddWithValue("@mgr", req.ReportingManagerId.Value));
+            if (managerEligible == null || managerEligible == DBNull.Value || Convert.ToInt32(managerEligible) != 1)
+                return BadRequest(new { error = "Reporting manager must be an active, non-connector employee." });
+
             var reportsToSelf = await _db.ScalarAsync(@"
                 SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER
                 WHERE EMP_CODE = @mgr AND (REPORTING_MANAGER_ID = @e OR @e IN (
@@ -500,13 +531,14 @@ public class EmployeesController : ControllerBase
                 return BadRequest(new { error = "That reporting manager sits under this employee — it would create a circular hierarchy." });
         }
 
-        var exists = await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+        var exists = await _db.ScalarAsync(@"
+            SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p => p.AddWithValue("@e", empCode));
-        if (Convert.ToInt32(exists) == 0) return NotFound(new { error = "Employee not found." });
+        if (Convert.ToInt32(exists) == 0) return NotFound(new { error = "Active employee not found (inactive employees and connectors are excluded)." });
 
         var affected = await _db.ExecuteAsync(@"
-            UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER SET
+            UPDATE e SET
                 EMP_NAME = LTRIM(RTRIM(@n)),
                 DESIG_ID = @dg,
                 EMAIL_ID = NULLIF(LTRIM(RTRIM(@em)), ''),
@@ -536,7 +568,8 @@ public class EmployeesController : ControllerBase
                 PRODUCT_KEY = COALESCE(@pkey, PRODUCT_KEY),
                 MODIFIED_BY = @by,
                 MODIFIED_DATE = GETDATE()
-            WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p =>
         {
             p.AddWithValue("@n", req.EmployeeName.Trim());
@@ -583,7 +616,7 @@ public class EmployeesController : ControllerBase
             Flag("@etypeSet", req.EmployeeType != null); Text("@etype", req.EmployeeType);
             Flag("@catSet", req.Category != null); Text("@cat", req.Category);
         });
-        if (affected == 0) return NotFound(new { error = "Employee not found." });
+        if (affected == 0) return NotFound(new { error = "Active employee not found (inactive employees and connectors are excluded)." });
 
         // Password is handled separately and only when supplied: it is never read back, and
         // a blank field must mean "leave the existing password alone", not "set it to empty".
@@ -594,14 +627,16 @@ public class EmployeesController : ControllerBase
             if (req.Password.Length > 100)
                 return BadRequest(new { error = "Password exceeds 100 characters." });
 
-            await _db.ExecuteAsync(
-                "UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER SET PASSWORD = @pw, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE() WHERE EMP_CODE = @e",
+            var passwordUpdated = await _db.ExecuteAsync(
+                "UPDATE e SET PASSWORD = @pw, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE() FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
                 p =>
                 {
                     p.AddWithValue("@pw", req.Password);
                     p.AddWithValue("@by", GetEmpCode());
                     p.AddWithValue("@e", empCode);
                 });
+            if (passwordUpdated == 0)
+                return NotFound(new { error = "Active employee not found (inactive employees and connectors are excluded)." });
         }
 
         _logger.LogInformation("Employee {EmpCode} updated by {User}", empCode, GetEmpCode());
@@ -612,20 +647,28 @@ public class EmployeesController : ControllerBase
     [HttpPut("{empCode:int}/status")]
     public async Task<IActionResult> SetEmployeeStatus(int empCode, [FromBody] UpdateEmployeeStatusRequest req)
     {
-        if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode))
+        if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode, allowInactiveTarget: true))
             return StatusCode(403, new { error = "This employee is outside your team's scope." });
 
-        var exists = await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+        var exists = await _db.ScalarAsync(@"
+            SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p => p.AddWithValue("@e", empCode));
-        if (Convert.ToInt32(exists) == 0) return NotFound(new { error = "Employee not found." });
+        if (Convert.ToInt32(exists) == 0) return NotFound(new { error = "Employee not found (connectors are excluded)." });
 
+        // "Active" is now LAST_WORKING_DATE IS NULL everywhere, so the toggle has to move
+        // THAT column. Writing only the ACTIVE bit would report success and change
+        // nothing visible - the 3,249 rows that disagree are exactly this bug. The bit
+        // is still written alongside so any legacy consumer of it stays consistent.
         var affected = await _db.ExecuteAsync(@"
-            UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER
-            SET ACTIVE = @a, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE()
-            WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+            UPDATE e
+            SET LAST_WORKING_DATE = @lwd, ACTIVE = @a, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE()
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p =>
         {
+            // Re-activating means "no last working date"; deactivating stamps today.
+            p.AddWithValue("@lwd", req.IsActive ? (object)DBNull.Value : DateTime.Today.ToString("MM/dd/yyyy"));
             p.AddWithValue("@a", req.IsActive ? 1 : 0);
             p.AddWithValue("@by", GetEmpCode());
             p.AddWithValue("@e", empCode);
@@ -640,7 +683,7 @@ public class EmployeesController : ControllerBase
     [HttpDelete("{empCode:int}")]
     public async Task<IActionResult> DeleteEmployee(int empCode)
     {
-        if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode))
+        if (!await _hierarchy.IsInScopeAsync(GetEmpCode(), RoleId, empCode, allowInactiveTarget: true))
             return StatusCode(403, new { error = "This employee is outside your team's scope." });
 
         // Prevent deleting yourself.
@@ -656,9 +699,10 @@ public class EmployeesController : ControllerBase
             return BadRequest(new { error = "Release the employee's active DID first, then delete." });
 
         var affected = await _db.ExecuteAsync(@"
-            UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER
+            UPDATE e
             SET IS_DELETED = 1, ACTIVE = 0, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE()
-            WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p =>
         {
             p.AddWithValue("@by", GetEmpCode());
@@ -676,14 +720,16 @@ public class EmployeesController : ControllerBase
     public async Task<ActionResult<object>> EmployeesWithoutDid([FromQuery] string? search = null)
     {
         var scopeSql = await ScopeSqlAsync();
+        var onRoll = EmployeeFilters.Active("e");
+        var notConnector = EmployeeFilters.NotConnector("e");
         var sql = $@"
             SELECT TOP 50 e.EMP_CODE, e.EMP_CODE AS EMP_CODE_TEXT, e.EMP_NAME, dn.DESIG_NAME
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
-            WHERE ISNULL(e.ACTIVE, 0) = 1 AND ISNULL(e.IS_DELETED, 0) = 0{scopeSql}
+            WHERE {onRoll} AND ISNULL(e.IS_DELETED, 0) = 0{scopeSql}
               AND NOT EXISTS (SELECT 1 FROM dbo.TBL_CIP_EMPLOYEE_DID d WHERE d.EMP_CODE = e.EMP_CODE AND ISNULL(d.IS_DELETED,0) = 0)
               AND ISNULL(e.ROLE_ID, 0) IN (5, 4, 1007)
-              AND ISNULL(e.ROLE_ID, 0) <> 2010 AND ISNULL(e.DESIG_ID, 0) <> 1014";
+              AND {notConnector}";
         if (!string.IsNullOrWhiteSpace(search))
             sql += " AND (e.EMP_NAME LIKE @q OR CAST(e.EMP_CODE AS VARCHAR(20)) LIKE @q)";
         sql += " ORDER BY e.EMP_NAME";
@@ -716,10 +762,21 @@ public class EmployeesController : ControllerBase
         var did = (request.DidNumber ?? "").Trim();
         if (did.Length == 0) return BadRequest(new { error = "SIP username is required." });
 
-        if (request.EmpCode.HasValue && !IsAdmin)
+        if (request.EmpCode.HasValue)
         {
             if (!await _hierarchy.IsInScopeAsync(EmpCode, RoleId, request.EmpCode.Value))
-                return StatusCode(403, new { error = "You can only assign DIDs to employees in your team." });
+                return StatusCode(403, new { error = "You can only assign DIDs to active, non-connector employees in your team." });
+        }
+
+        if (request.EmpCode.HasValue)
+        {
+            var targetIsDialerUser = await _db.ScalarAsync(
+                "SELECT CASE WHEN " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e")
+                    + " AND " + EmployeeFilters.NotConnector("e") + " AND ISNULL(e.ROLE_ID, 0) IN (5,4,1007) THEN 1 ELSE 0 END " +
+                "FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @e",
+                p => p.AddWithValue("@e", request.EmpCode.Value));
+            if (targetIsDialerUser == null || targetIsDialerUser == DBNull.Value || Convert.ToInt32(targetIsDialerUser) != 1)
+                return BadRequest(new { error = "DIDs may only be assigned to active non-connector dialer employees." });
         }
 
         var exists = await _db.ScalarAsync(@"
@@ -907,10 +964,11 @@ public class EmployeesController : ControllerBase
         if (!AllowedDocExt.Contains(ext))
             return BadRequest(new { error = $"Extension '{ext}' is not allowed ({string.Join(", ", AllowedDocExt)})." });
 
-        var empExists = await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE EMP_CODE = @e AND ISNULL(IS_DELETED,0) = 0",
+        var empExists = await _db.ScalarAsync(@"
+            SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p => p.AddWithValue("@e", empCode));
-        if (Convert.ToInt32(empExists) == 0) return NotFound(new { error = "Employee not found." });
+        if (Convert.ToInt32(empExists) == 0) return NotFound(new { error = "Employee not found (connectors are excluded)." });
 
         var folder = Path.Combine(DocsRoot(), empCode.ToString());
         Directory.CreateDirectory(folder);
@@ -994,7 +1052,7 @@ public class EmployeesController : ControllerBase
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_DESIGNATION_MASTER dn ON dn.DESIG_ID = e.DESIG_ID
             LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
-            WHERE e.EMP_CODE = @e AND ISNULL(e.IS_DELETED,0) = 0",
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p => p.AddWithValue("@e", empCode));
         if (dt.Rows.Count == 0) return NotFound(new { error = "Employee not found." });
 

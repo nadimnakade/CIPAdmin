@@ -108,8 +108,22 @@ public class DialerLiveController : ControllerBase
             var table = ds.Tables.Count > 0 ? ds.Tables[0] : null;
             if (table != null)
             {
+                // The legacy report SP scopes by hierarchy and on-roll status, but does
+                // not consistently exclude CONNECTORs. Treat its rows as candidates and
+                // apply the same canonical employee eligibility rule as every other picker.
+                var candidateCodes = table.Rows.Cast<DataRow>()
+                    .Where(row => row.Table.Columns.Contains("EmployeeCode") && row["EmployeeCode"] != DBNull.Value)
+                    .Select(row => int.TryParse(row["EmployeeCode"].ToString(), out var code) ? code : 0)
+                    .Where(code => code > 0);
+                var eligibleCodes = await EmployeeFilters.FilterActiveCodesAsync(_db, candidateCodes);
+
                 foreach (DataRow r in table.Rows)
                 {
+                    if (!r.Table.Columns.Contains("EmployeeCode") || r["EmployeeCode"] == DBNull.Value
+                        || !int.TryParse(r["EmployeeCode"].ToString(), out var employeeCode)
+                        || !eligibleCodes.Contains(employeeCode))
+                        continue;
+
                     var row = new DialerAgentRow
                     {
                         Caller = r["Caller"].ToString() ?? "",

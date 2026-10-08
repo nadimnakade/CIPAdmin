@@ -81,6 +81,7 @@ export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
             { label: 'Access Control', to: '/access-control' },
             { label: 'Menu Master', to: '/menu-master' },
             { label: 'Role & Privilege Master', to: '/role-master' },
+            { label: 'Error Log', to: '/error-logs' },
           ],
         },
         FALLBACK_NAV[4],
@@ -118,6 +119,7 @@ export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
                   { label: 'Access Control', to: '/access-control' },
                   { label: 'Menu Master', to: '/menu-master' },
                   { label: 'Role & Privilege Master', to: '/role-master' },
+                  { label: 'Error Log', to: '/error-logs' },
                 ],
               },
             ]

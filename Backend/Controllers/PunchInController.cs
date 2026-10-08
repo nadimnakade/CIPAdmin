@@ -5,16 +5,6 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace CIPAdmin.Backend.Controllers;
 
-/// <summary>
-/// Punch In / Out — a port of CIPPortal's PunchInController and the PunchIn view.
-///
-/// The legacy screen offered three cascading selects (Location → TL → Caller, Caller being
-/// multi-select), a datetime-local box and two buttons that posted to
-/// <c>PunchIn/Manage</c>, which called <c>USP_MANAGE_PUNCHINOUT_TEST</c> with the chosen
-/// employee codes as a comma-separated string. All of that is reproduced here; the one
-/// addition is a "not punched today" list, because the legacy screen gave no feedback at
-/// all after a punch.
-/// </summary>
 [ApiController]
 [Route("api/punchin")]
 [Authorize]
@@ -22,8 +12,6 @@ public class PunchInController : ControllerBase
 {
     private readonly IDbContext _db;
     private readonly ILogger<PunchInController> _logger;
-
-    /// <summary>The procedure splits this into rows; keep it well inside the limit.</summary>
     private const int MaxEmployeesPerPunch = 500;
 
     public PunchInController(IDbContext db, ILogger<PunchInController> logger)
@@ -34,40 +22,27 @@ public class PunchInController : ControllerBase
 
     private int EmpCode => int.Parse(User.FindFirst("empCode")!.Value);
 
-    /// <summary>Locations (branch offices).</summary>
     [HttpGet("locations")]
-    public async Task<ActionResult<object>> Locations()
-        => Ok(await DropdownAsync("FLocation"));
+    public async Task<ActionResult<object>> Locations() => Ok(await DropdownAsync("FLocation"));
 
-    /// <summary>
-    /// Team leaders for a location, scoped to the signed-in user's reporting line.
-    /// The legacy PunchIn view called MonthlyAppReport/FillSupervisor, which runs
-    /// USP_CIP_FILL_SUPERVISOR — not the unfiltered FSupervisor dropdown.
-    /// </summary>
     [HttpPost("supervisors")]
     public async Task<ActionResult<object>> Supervisors([FromBody] BranchRequest body)
     {
         var dt = await _db.QueryAsync(
             "EXEC dbo.USP_CIP_FILL_SUPERVISOR @BRANCH_ID=@b, @USER_KEY=@u",
             p => { p.AddWithValue("@b", body.BranchId); p.AddWithValue("@u", EmpCode); });
-
-        var list = new List<Option>();
-        foreach (DataRow r in dt.Rows)
-        {
-            // Columns are EMP_NAME, EMP_CODE, ORD — unnamed aliases, so read positionally.
-            var name = r[0]?.ToString()?.Trim() ?? "";
-            if (!int.TryParse(r[1]?.ToString(), out var code) || code == 0) continue;
-            list.Add(new Option(code, name));
-        }
-        return Ok(list);
+        var raw = dt.Rows.Cast<DataRow>()
+            .Select(r => new
+            {
+                Name = r[0]?.ToString()?.Trim() ?? "",
+                Code = int.TryParse(r[1]?.ToString(), out var code) ? code : 0
+            })
+            .Where(row => row.Code > 0)
+            .ToList();
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, raw.Select(row => row.Code));
+        return Ok(raw.Where(row => eligible.Contains(row.Code)).Select(row => new Option(row.Code, row.Name)).ToList());
     }
 
-    /// <summary>
-    /// Callers reporting to a team leader at a location: the TL plus their direct reports.
-    /// The legacy view called MonthlyAppReport/FillTelecaller, which runs
-    /// USP_CIP_DATA_ENTRY with @Action='FTelecaller' and @SUPERVISOR_ID / @BRANCH_ID —
-    /// the FTelecaller branch of USP_CIP_FILL_DROPDOWN is a different (and wrong) query.
-    /// </summary>
     [HttpPost("callers")]
     public async Task<ActionResult<object>> Callers([FromBody] SupervisorRequest body)
     {
@@ -75,16 +50,16 @@ public class PunchInController : ControllerBase
             "EXEC dbo.USP_CIP_DATA_ENTRY @Action='FTelecaller', @SUPERVISOR_ID=@s, @BRANCH_ID=@b",
             p => { p.AddWithValue("@s", body.SupervisorId ?? -1); p.AddWithValue("@b", body.BranchId); },
             CancellationToken.None);
-
-        var list = new List<Option>();
-        foreach (DataRow r in dt.Rows)
-        {
-            if (!int.TryParse(r[0]?.ToString(), out var code) || code == 0) continue;
-            var name = r[1]?.ToString()?.Trim() ?? "";
-            if (name.StartsWith("---", StringComparison.Ordinal) || name.Length == 0) continue;
-            list.Add(new Option(code, name));
-        }
-        return Ok(list);
+        var raw = dt.Rows.Cast<DataRow>()
+            .Select(r => new
+            {
+                Code = int.TryParse(r[0]?.ToString(), out var code) ? code : 0,
+                Name = r[1]?.ToString()?.Trim() ?? ""
+            })
+            .Where(row => row.Code > 0 && row.Name.Length > 0 && !row.Name.StartsWith("---", StringComparison.Ordinal))
+            .ToList();
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, raw.Select(row => row.Code));
+        return Ok(raw.Where(row => eligible.Contains(row.Code)).Select(row => new Option(row.Code, row.Name)).ToList());
     }
 
     private async Task<List<Option>> DropdownAsync(string flag, int? branchId = null, int? supervisorId = null)
@@ -97,54 +72,40 @@ public class PunchInController : ControllerBase
                 p.AddWithValue("@branch", branchId ?? 0);
                 p.AddWithValue("@sup", supervisorId.HasValue ? (object)supervisorId.Value.ToString() : "");
             });
-        var list = new List<Option>();
-        foreach (DataRow r in dt.Rows)
-        {
-            var id = r[0] == DBNull.Value ? 0 : Convert.ToInt32(r[0]);
-            var name = r[1]?.ToString() ?? "";
-            // The legacy dropdowns carried the procedure's own "---Select---" row. The page
-            // already renders its own placeholder, so drop it rather than showing it twice.
-            if (id <= 0 && (name.Length == 0 || name.StartsWith("---", StringComparison.Ordinal))) continue;
-            list.Add(new Option(id, name));
-        }
-        return list;
+        var raw = dt.Rows.Cast<DataRow>()
+            .Select(r => new Option(r[0] == DBNull.Value ? 0 : Convert.ToInt32(r[0]), r[1]?.ToString() ?? ""))
+            .Where(row => row.Id > 0 || (row.Name.Length > 0 && !row.Name.StartsWith("---", StringComparison.Ordinal)))
+            .ToList();
+        // FLocation returns location-master IDs, not employee codes. Leave those
+        // options intact; employee filtering belongs on the employee-valued pickers.
+        return raw;
     }
 
     public class PunchRequest
     {
-        /// <summary>
-        /// When the punch happened. Any ISO-8601 value the model binder can parse; it is
-        /// normalised server-side before being handed to the procedure.
-        /// </summary>
         public DateTime Date { get; set; } = DateTime.Now;
-
-        /// <summary>"I" punches in, anything else punches out — the procedure's own test.</summary>
         public string Type { get; set; } = "I";
-
         public List<int> EmpKeys { get; set; } = new();
     }
 
     public class BranchRequest { public int BranchId { get; set; } }
     public class SupervisorRequest { public int BranchId { get; set; } public int? SupervisorId { get; set; } }
 
-    /// <summary>Record a punch in or out for the selected employees.</summary>
     [HttpPost("punch")]
     public async Task<IActionResult> Punch([FromBody] PunchRequest body)
     {
-        var employees = body.EmpKeys.Where(k => k > 0).Distinct().ToList();
+        var submitted = body.EmpKeys.Where(code => code > 0).Distinct().ToList();
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, submitted);
+        var employees = eligible.ToList();
         if (employees.Count == 0)
-            return BadRequest(new { error = "Select at least one employee." });
+            return BadRequest(new { error = "Select at least one active, non-connector employee." });
+        if (employees.Count != submitted.Count)
+            return BadRequest(new { error = "One or more selected employees are inactive, deleted, or connectors." });
         if (employees.Count > MaxEmployeesPerPunch)
             return BadRequest(new { error = $"At most {MaxEmployeesPerPunch} employees can be punched at once." });
 
         var type = string.Equals(body.Type, "I", StringComparison.OrdinalIgnoreCase) ? "I" : "O";
-
-        // USP_MANAGE_PUNCHINOUT_TEST reads the timestamp with fixed SUBSTRING offsets
-        // (year 1-4, month 6-7, day 9-10, time 12-16), which only line up with the
-        // "yyyy-MM-ddTHH:mm" shape an <input type="datetime-local"> produces. Reformatting
-        // here means the endpoint is safe for any client that sends a normal ISO timestamp.
         var stamp = body.Date.ToString("yyyy-MM-ddTHH:mm");
-
         try
         {
             var dt = await _db.QueryAsync(
@@ -155,16 +116,9 @@ public class PunchInController : ControllerBase
                     p.AddWithValue("@t", type);
                     p.AddWithValue("@k", string.Join(",", employees));
                 });
-
-            // The procedure answers with the string it recorded, so the user can see the
-            // exact value that landed in EAM_START_TIME / EAM_END_TIME.
             var recorded = dt.Rows.Count > 0 ? dt.Rows[0][0]?.ToString() ?? "" : "";
-
-            _logger.LogInformation(
-                "Punch {Type} recorded for {Count} employee(s) at {Stamp} by {Emp}",
-                type == "I" ? "in" : "out", employees.Count, recorded,
-                User.FindFirst("empName")?.Value ?? "");
-
+            _logger.LogInformation("Punch {Type} recorded for {Count} employee(s) at {Stamp} by {Emp}",
+                type == "I" ? "in" : "out", employees.Count, recorded, User.FindFirst("empName")?.Value ?? "");
             return Ok(new { ok = true, type, count = employees.Count, recorded });
         }
         catch (Exception ex)
@@ -174,25 +128,28 @@ public class PunchInController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Employees who have not punched in today, with their team leader and location.
-    /// Backed by USP_EMPLOYEE_NOT_PUNCHED_TODAY; the columns are unnamed in that procedure,
-    /// so they are read positionally.
-    /// </summary>
     [HttpGet("not-punched")]
     public async Task<ActionResult<object>> NotPunched()
     {
-        var dt = await _db.QueryAsync("EXEC dbo.USP_EMPLOYEE_NOT_PUNCHED_TODAY", null, CancellationToken.None);
-        var rows = new List<object>();
-        foreach (DataRow r in dt.Rows)
+        // The legacy procedure only selects the display values and contains a stale ACTIVE
+        // predicate. Rebuild its query with the canonical on-roll/connector rules instead.
+        var dt = await _db.QueryAsync(@"
+            SELECT vw.Caller, vw.TL, vw.[Location Name]
+            FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
+            INNER JOIN dbo.VW_EMPLOYEE_HIERARCHY vw ON vw.[Caller Code] = e.EMP_CODE
+            LEFT JOIN dbo.TBL_CIP_ATTENDANCE_MASTER a
+              ON e.EMP_CODE = a.EAM_EMP_CODE
+             AND CAST(a.EAM_CREATED_ON AS DATE) = CAST(GETDATE() AS DATE)
+            WHERE a.EAM_EMP_CODE IS NULL
+              AND " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e") + @"
+              AND ISNULL(e.ROLE_ID, 0) NOT IN (1, 2, 2013, 2014, 2015)
+            ORDER BY vw.[Location Name], vw.TL");
+        var rows = dt.AsEnumerable().Select(r => new
         {
-            rows.Add(new
-            {
-                employee = r[0]?.ToString() ?? "",
-                supervisor = r.Table.Columns.Count > 1 ? r[1]?.ToString() ?? "" : "",
-                location = r.Table.Columns.Count > 2 ? r[2]?.ToString() ?? "" : "",
-            });
-        }
+            employee = r["Caller"]?.ToString() ?? "",
+            supervisor = r["TL"]?.ToString() ?? "",
+            location = r["Location Name"]?.ToString() ?? "",
+        }).ToList();
         return Ok(new { count = rows.Count, rows });
     }
 

@@ -72,6 +72,10 @@ interface BsaResponse {
   success: boolean;
   filename: string;
   transactionCount: number;
+  /** Present on /api/bsa/analyze-flex. False means a CIBIL-only run, so the
+   *  transaction-derived tabs have nothing to show and must not render zeroes. */
+  statementProvided?: boolean;
+  cibilProvided?: boolean;
   analysis: BsaAnalysis;
   cibil?: BsaCibil | null;
   crossVerify?: { matched: { cibilLender: string; statementLender: string }[]; missingInStatement: string[]; missingInCibil: string[] } | null;
@@ -192,11 +196,16 @@ export default function BsaAnalyzerPage() {
   const cibilRef = useRef<HTMLInputElement>(null);
 
   const analyze = async () => {
-    if (!statement) { setError('Choose a bank statement file first (PDF / CSV / XLSX / TXT).'); return; }
+    // Either upload is enough. Requiring the statement made the CIBIL-only path -
+    // which this screen was built for - unreachable.
+    if (!statement && !cibil) {
+      setError('Choose a bank statement, a CIBIL report, or both.');
+      return;
+    }
     setBusy(true); setError(''); setNotice(''); setResult(null);
     try {
       const form = new FormData();
-      form.append('statement', statement);
+      if (statement) form.append('statement', statement);
       if (cibil) form.append('cibil', cibil);
       if (cibilPassword.trim()) {
         // The field is already labelled "PDF password (if protected)", so apply it to
@@ -205,11 +214,17 @@ export default function BsaAnalyzerPage() {
         form.append('cibilPassword', cibilPassword.trim());
         form.append('statementPassword', cibilPassword.trim());
       }
-      const res = await api.upload<BsaResponse>('/api/bsa/analyze', form);
+      // analyze-flex, not analyze: this endpoint accepts a CIBIL-only upload, which
+      // /api/bsa/analyze deliberately does not.
+      const res = await api.upload<BsaResponse>('/api/bsa/analyze-flex', form);
       setResult(res);
-      setTab('Transactions');
+      // Transactions is the natural landing tab for a statement run, but it is empty
+      // without one, so a CIBIL-only run opens on Summary where the report actually is.
+      setTab(res.statementProvided === false ? 'Summary' : 'Transactions');
       setNotice(
-        `Analyzed ${res.transactionCount} transactions from ${res.filename}` +
+        (res.statementProvided === false
+          ? 'No bank statement supplied — showing CIBIL-only analysis'
+          : `Analyzed ${res.transactionCount} transactions from ${res.filename}`) +
         (res.cibil ? ' with CIBIL report' : ''),
       );
       const entry: BsaHistoryEntry = {
@@ -243,7 +258,10 @@ export default function BsaAnalyzerPage() {
 
   const openHistoryEntry = (entry: BsaHistoryEntry) => {
     setResult(entry.result);
-    setTab('Transactions');
+    // Same rule as a fresh run: a saved CIBIL-only analysis has no transactions, so
+    // opening it on the Transactions tab shows an empty grid. Entries saved before
+    // statementProvided existed leave it undefined, which counts as "has statement".
+    setTab(entry.result.statementProvided === false ? 'Summary' : 'Transactions');
     setShowHistory(false);
     setError('');
     setNotice(`Loaded saved analysis of ${entry.filename} (${new Date(entry.savedAt).toLocaleString()}).`);
@@ -365,12 +383,24 @@ export default function BsaAnalyzerPage() {
     if (!result || !a || exporting) return;
     setExporting(true);
     const rows: string[][] = [];
-    rows.push(['Bank Statement Analysis']);
+    rows.push([hasStatement ? 'Bank Statement Analysis' : 'CIBIL Report Analysis (no bank statement supplied)']);
     rows.push(['Classification is based on bank narration. Broker funding/payout is not proof of a buy, sell, trade profit, or F&O segment. Verify with contract notes or broker ledger.']);
     rows.push([`File: ${result.filename}`]);
-    rows.push([`Period: ${a.accountSummary.period}`]);
+    // accountSummary.period is derived from parsed transactions, so it is empty on a
+    // CIBIL-only run. Printing "Period:" with nothing after it looks like a bug.
+    if (hasStatement && a.accountSummary.period) rows.push([`Period: ${a.accountSummary.period}`]);
     rows.push([`Generated: ${new Date().toLocaleString()}`]);
     rows.push([]);
+
+    /* A CIBIL-only run has no transactions, so every figure below is a structural
+       zero. An exported sheet is even more dangerous than the screen: it gets emailed
+       and filed, and "Avg Monthly Salary 0" reads as a finding about the applicant
+       rather than as missing data. Say so in the file itself instead. */
+    if (!hasStatement) {
+      rows.push(['Bank statement section omitted']);
+      rows.push(['No bank statement was supplied with this run, so transaction-derived figures (income, obligations, category counts) are not available. They are NOT zero - they are unknown.']);
+      rows.push([]);
+    } else {
 
     rows.push(['Account Summary']);
     rows.push(['Total Credits', String(a.accountSummary.totalCredits)]);
@@ -386,11 +416,12 @@ export default function BsaAnalyzerPage() {
     rows.push([]);
 
     for (const t of tables) {
-      if (!t.rows.length) continue;
-      rows.push([t.id]);
-      rows.push(t.columns.map((c) => c.label));
-      for (const r of t.rows) rows.push(t.columns.map((c) => typeof r[c.key] === 'boolean' ? (r[c.key] ? 'Yes' : 'No') : String(r[c.key] ?? '')));
-      rows.push([]);
+        if (!t.rows.length) continue;
+        rows.push([t.id]);
+        rows.push(t.columns.map((c) => c.label));
+        for (const r of t.rows) rows.push(t.columns.map((c) => typeof r[c.key] === 'boolean' ? (r[c.key] ? 'Yes' : 'No') : String(r[c.key] ?? '')));
+        rows.push([]);
+      }
     }
 
     if (c) {
@@ -459,17 +490,25 @@ export default function BsaAnalyzerPage() {
     }
   };
 
+  /* A CIBIL-only run has no transactions, so every statement-derived figure is a
+     structural zero. Rendering them would be worse than showing nothing: "Avg Monthly
+     Salary ₹0" reads as "this applicant earns nothing" rather than "no statement was
+     supplied". Only the CIBIL-derived cards are shown in that case. */
+  const hasStatement = result?.statementProvided !== false;
+
   // Summary stat cards (mirrors the reference design)
   const cards: { icon: string; tone: string; label: string; value: string; sub?: string; danger?: boolean }[] = a ? [
-    { icon: 'fileText', tone: 'blue', label: 'Transactions', value: String(a.accountSummary.transactionCount), sub: a.accountSummary.period },
-    { icon: 'trendingUp', tone: 'green', label: 'Total Credits', value: fmtMoney(a.accountSummary.totalCredits) },
-    { icon: 'trendingDown', tone: 'red', label: 'Total Debits', value: fmtMoney(a.accountSummary.totalDebits) },
-    { icon: 'download', tone: 'purple', label: 'Net Balance', value: fmtMoney(a.accountSummary.netBalance), danger: a.accountSummary.netBalance < 0 },
-    { icon: 'rupee', tone: 'amber', label: 'Avg Monthly Salary', value: fmtMoney(a.insights.avgMonthlySalary) },
-    { icon: 'calendar', tone: 'blue', label: 'Monthly EMI', value: fmtMoney(a.insights.totalEmiMonthly) },
-    { icon: 'wallet', tone: 'green', label: 'Disbursed', value: fmtMoney(a.insights.totalDisbursed) },
-    { icon: 'percent', tone: 'green', label: 'EMI / Income', value: `${a.insights.obligationToIncomeRatio}%` },
-    { icon: 'percent', tone: a.insights.savingsRate < 0 ? 'red' : 'green', label: 'Savings Rate', value: `${a.insights.savingsRate}%`, danger: a.insights.savingsRate < 0 },
+    ...(hasStatement ? [
+      { icon: 'fileText', tone: 'blue', label: 'Transactions', value: String(a.accountSummary.transactionCount), sub: a.accountSummary.period },
+      { icon: 'trendingUp', tone: 'green', label: 'Total Credits', value: fmtMoney(a.accountSummary.totalCredits) },
+      { icon: 'trendingDown', tone: 'red', label: 'Total Debits', value: fmtMoney(a.accountSummary.totalDebits) },
+      { icon: 'download', tone: 'purple', label: 'Net Balance', value: fmtMoney(a.accountSummary.netBalance), danger: a.accountSummary.netBalance < 0 },
+      { icon: 'rupee', tone: 'amber', label: 'Avg Monthly Salary', value: fmtMoney(a.insights.avgMonthlySalary) },
+      { icon: 'calendar', tone: 'blue', label: 'Monthly EMI', value: fmtMoney(a.insights.totalEmiMonthly) },
+      { icon: 'wallet', tone: 'green', label: 'Disbursed', value: fmtMoney(a.insights.totalDisbursed) },
+      { icon: 'percent', tone: 'green', label: 'EMI / Income', value: `${a.insights.obligationToIncomeRatio}%` },
+      { icon: 'percent', tone: a.insights.savingsRate < 0 ? 'red' : 'green', label: 'Savings Rate', value: `${a.insights.savingsRate}%`, danger: a.insights.savingsRate < 0 },
+    ] : []),
     ...(el ? [{ icon: 'shield', tone: 'blue', label: 'Eligibility', value: el.decision, sub: el.foir != null ? `FOIR ${(el.foir * 100).toFixed(0)}%` : undefined }] : []),
     ...(u ? [{ icon: 'check', tone: 'purple', label: 'Underwriting Grade', value: u.grade, sub: u.cibilScore != null ? `Score ${u.cibilScore}` : undefined }] : []),
   ] : [];
@@ -484,7 +523,7 @@ export default function BsaAnalyzerPage() {
     }
     return { highestCredit, highestDebit };
   }, [transactions]);
-  const overviewCards = a ? [
+  const overviewCards = a && hasStatement ? [
     { icon: 'total', tone: 'blue', label: 'Total Transactions', value: fmtNum(a.accountSummary.transactionCount), sub: 'In the uploaded statement' },
     { icon: 'download', tone: 'green', label: 'Total Credits', value: fmtMoney(a.accountSummary.totalCredits), sub: 'Money received' },
     { icon: 'upload', tone: 'red', label: 'Total Debits', value: fmtMoney(a.accountSummary.totalDebits), sub: 'Money paid out' },
@@ -514,7 +553,7 @@ export default function BsaAnalyzerPage() {
           <div className="bsa-head-icon"><Icon name="fileText" size={26} /></div>
           <div>
             <h1>CIBIL &amp; Bank Statement Analyzer</h1>
-            <p className="muted">Upload a bank statement (and optionally a CIBIL report) — rule-based transaction classification: salary, EMIs, mutual funds, insurance, investments, equity/F&O activity and credit-card payments.</p>
+            <p className="muted">Upload a bank statement, a CIBIL report, or both — rule-based transaction classification: salary, EMIs, mutual funds, insurance, investments, equity/F&O activity and credit-card payments.</p>
           </div>
         </div>
         <div className="bsa-head-actions">
@@ -589,7 +628,7 @@ export default function BsaAnalyzerPage() {
             >
               <div className="bsa-drop-icon"><Icon name="fileText" size={22} /></div>
               <div className="bsa-drop-text">
-                <strong className="bsa-upload-label">Bank Statement <span>*</span></strong>
+                <strong className="bsa-upload-label">Bank Statement <em>(optional)</em></strong>
                 {statement ? <span className="bsa-drop-file" title={statement.name}><Icon name="fileText" size={12} />{statement.name}</span> : <span className="bsa-drop-hint">Choose file or drag &amp; drop</span>}
                 <small>{statement ? `${statement.name.split('.').pop()?.toUpperCase()} · ${fileSize(statement)}` : 'PDF / CSV / XLSX / TXT · ≤ 25 MB'}</small>
               </div>
@@ -639,7 +678,15 @@ export default function BsaAnalyzerPage() {
             </div>
           </div>
           <div className="bsa-upload-actions">
-            <button className="btn primary bsa-analyze-btn" disabled={busy || !statement} onClick={analyze}>
+            {/* The button is disabled with nothing selected, which tells the user
+                nothing about WHY. Either file alone is valid, so state the real
+                rule - at least one, not both - instead of a silently dead button. */}
+            {!statement && !cibil && !busy && (
+              <p className="bsa-need-file" role="status">
+                Required: a bank statement <b>or</b> a CIBIL report.
+              </p>
+            )}
+            <button className="btn primary bsa-analyze-btn" disabled={busy || (!statement && !cibil)} onClick={analyze}>
               <Icon name="barChart" size={16} /> {busy ? 'Analyzing…' : 'Analyze'}
             </button>
             <button className="btn bsa-clear-btn" onClick={clearAll} disabled={busy}>
@@ -843,7 +890,7 @@ export default function BsaAnalyzerPage() {
 
           {tab === 'Underwriting' && (
             <div className="bsa-summary">
-              {!u ? <p className="muted">Upload both a statement and a CIBIL report to see underwriting results.</p> : (
+              {!u ? <p className="muted">Upload a CIBIL report to see underwriting results — a bank statement is optional.</p> : (
                 <>
                   <div className="bsa-cards">
                     <div className="bsa-card">
@@ -915,12 +962,23 @@ export default function BsaAnalyzerPage() {
             </div>
           )}
 
-          {tables.filter((t) => t.id === tab && tab !== 'Transactions').map((t) => (
+          {/* Transaction-derived tabs have nothing to show when the user supplied only a
+              CIBIL report. Say so plainly instead of rendering a grid of zeroes, which
+              reads like "this applicant has no income" rather than "no data supplied". */}
+          {result.statementProvided === false ? (
+            <p className="muted">
+              This tab is built from bank statement transactions, and no bank statement was
+              uploaded. Re-run the analysis with a statement to populate it — the CIBIL,
+              Eligibility and Underwriting tabs are already available.
+            </p>
+          ) : (
+            tables.filter((t) => t.id === tab && tab !== 'Transactions').map((t) => (
             <div key={t.id}><div className="bsa-section-heading"><h2>{TAB_LABELS[t.id] ?? t.id} <span>({t.rows.length})</span></h2><span>Full statement · included in Excel export</span></div><DataTable columns={t.columns} rows={t.rows} /></div>
-          ))}
+            ))
+          )}
         </div>
       )}
-      {!result && <div className="bsa-empty-state"><span className="bsa-empty-icon"><Icon name="barChart" size={30} /></span><h2>Your statement, at a glance</h2><p>Upload a bank statement to explore transactions, income, obligations and investment activity in one place.</p><div><span><Icon name="briefcase" size={14} />Salary &amp; EMIs</span><span><Icon name="trendingUp" size={14} />Investments &amp; trading</span><span><Icon name="wallet" size={14} />Credit-card payments</span></div></div>}
+      {!result && <div className="bsa-empty-state"><span className="bsa-empty-icon"><Icon name="barChart" size={30} /></span><h2>Your statement, at a glance</h2><p>Upload a bank statement, a CIBIL report, or both. A statement gives you transactions, income and obligations; a CIBIL report gives you score, eligibility and underwriting.</p><div><span><Icon name="briefcase" size={14} />Salary &amp; EMIs</span><span><Icon name="trendingUp" size={14} />Investments &amp; trading</span><span><Icon name="wallet" size={14} />Credit-card payments</span></div></div>}
     </div>
   );
 }

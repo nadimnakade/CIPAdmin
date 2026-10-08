@@ -87,10 +87,45 @@ public class VendorBalanceInfo
     public string CheckedOn { get; set; } = "";
 }
 
+/// <summary>One pull ATTEMPT for a PAN, read from TBL_CIP_CIBIL_PULL_LOG. The
+/// duplicate-pull freeze is decided on this, not on report rows: a report row only
+/// exists after a successful pull, so failed attempts were invisible to the old
+/// check and every retry cost a vendor credit.</summary>
+public class PullAttemptInfo
+{
+    public int LogId { get; set; }
+    public string PanNo { get; set; } = "";
+    public string ReportType { get; set; } = "cibil";
+    /// <summary>OK | FAILED | PENDING (vendor call in flight right now).</summary>
+    public string Status { get; set; } = "";
+    /// <summary>API | REGEN | CACHE | LEGACY — what kind of pull event this was.</summary>
+    public string Source { get; set; } = "";
+    /// <summary>Who requested the attempt (TBL_CIP_CIBIL_PULL_LOG.EMP_NAME).</summary>
+    public string? RequestedBy { get; set; }
+    public DateTime PulledDate { get; set; }
+    /// <summary>The vendor's error text for a FAILED attempt. Stripped by the
+    /// controller for non-admins — the failure reason is admin-only.</summary>
+    public string? ErrorMessage { get; set; }
+}
+
 public class CibilCheckResponse
 {
+    /// <summary>A report for this PAN exists this month (any user) — it will be served
+    /// from cache. Informational; does NOT mean the caller pulled it.</summary>
     public bool Exists { get; set; }
     public CibilReportInfo? Report { get; set; }
+    /// <summary>Latest attempt when no report exists — the source of the duplicate freeze.
+    /// Scoped to the CALLER's own attempts (plus any in-flight PENDING pull).</summary>
+    public PullAttemptInfo? LastAttempt { get; set; }
+    /// <summary>True when a previous attempt by THIS USER this month (any status) blocks
+    /// a fresh pull. Another user's attempt never blocks the caller.</summary>
+    public bool Blocked { get; set; }
+    /// <summary>The caller already pulled this PAN this month (directly or served from
+    /// cache). Gates the "already generated — download?" popup per user, so user B's
+    /// first-time pull of a PAN user A generated is not interrupted by user A's popup.</summary>
+    public bool PulledByMe { get; set; }
+    /// <summary>True when the caller may force a re-pull (admins only).</summary>
+    public bool CanRePull { get; set; }
     /// <summary>Message when regeneration was requested but a cached report exists.</summary>
     public string? Message { get; set; }
 }

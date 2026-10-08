@@ -19,9 +19,20 @@ SQLCMD="/c/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/sql
 echo "==> [1/5] stopping any running backend (frees CIPAdmin.Backend.exe)"
 taskkill //F //IM CIPAdmin.Backend.exe >/dev/null 2>&1 || true
 
-echo "==> [2/5] frontend typecheck + production build (base /CIPadmin/, api /CIPAdmin_API)"
+echo "==> [2/5] frontend typecheck + contrast gate + production build (base /CIPadmin/, api /CIPAdmin_API)"
 cd "$ROOT/Frontend" || exit 1
 ./node_modules/.bin/tsc -b --force
+# Same gate `npm run build` applies. Calling tsc/vite directly skips it, so run it
+# explicitly: a release must not be able to ship a contrast regression silently.
+node tools/check-contrast.mjs
+# Screen-level regression guards. These catch behaviour a typecheck cannot: the
+# analyzer upload rule is a one-token change that compiles, deploys, and only breaks
+# when a user uploads a CIBIL report alone.
+node tools/check-nav-active.mjs
+node tools/check-bsa-upload.mjs
+# The limit-request double submit is invisible to a typecheck: a ref guard and a
+# disabled button both compile. Firing two POSTs is the only way to see it.
+node tools/check-request-dedupe.mjs
 rm -rf dist
 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' VITE_BASE=/CIPadmin/ VITE_API_BASE=/CIPAdmin_API \
   ./node_modules/.bin/vite build
@@ -72,4 +83,13 @@ echo "  3. Backend/sql/TBL_CIP_APP_SETTINGS.sql"
 echo "  4. Backend/sql/CIBIL-PULL-LOG.sql"
 echo "  5. Backend/sql/APPLICATION-MODULES-MENU.sql"
 echo "  6. Backend/sql/PUNCHIN-MENU.sql"
+echo "  7. Backend/sql/AUTHENTICATOR-ADMIN-MENU.sql"
+echo "  8. Backend/sql/ERROR-LOG.sql            (admin Error Log - creates the table)"
+echo "  9. Backend/sql/ERROR-LOG-MENU.sql       (admin Error Log menu; needs step 8)"
+echo " 10. Backend/sql/LIMIT-REQUEST-DEDUPE.sql (blocks duplicate pending CIBIL limit requests)"
+echo " 11. Backend/sql/CIBIL-DEDUPE-FAILED.sql  (freezes repeat CIBIL pulls after a FAILED attempt)"
 echo "then run Backend/sql/DEPLOY-CHECK.sql and confirm every row says 'present'."
+echo ""
+echo "On a server that may already be partly deployed, run this FIRST - it is read-only"
+echo "and reports which of the scripts above are still missing:"
+echo "  Backend/sql/DEPLOY-GAP-CHECK.sql"

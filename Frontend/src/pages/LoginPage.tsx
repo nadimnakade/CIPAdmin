@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { QRCodeSVG } from 'qrcode.react';
 import { api, setAuth, clearAuth, takeSignOutReason, AuthUser, ApiError } from '../api';
 import Icon from '../components/Icon';
 import './LoginPage.css';
@@ -45,8 +46,11 @@ export default function LoginPage() {
   // elsewhere), so the card can explain itself instead of looking like a random expiry.
   const [signedOut, setSignedOut] = useState('');
 
-  const [step, setStep] = useState<'credentials' | 'otp'>('credentials');
+  const [step, setStep] = useState<'credentials' | 'otp' | 'enroll'>('credentials');
   const [otp, setOtp] = useState('');
+  // Enrollment data returned only on the enroll_otp step: the otpauth:// URI drives the
+  // QR code. Held in state so a back-and-forth between the two OTP screens keeps it.
+  const [enroll, setEnroll] = useState<{ uri: string; secret: string } | null>(null);
 
   // Portal hand-off: CIP_LogoutController/LogoutAll lands here with ?portalLogout=1
   // after abandoning the portal session — clear any token this app still holds.
@@ -82,7 +86,7 @@ export default function LoginPage() {
         rememberMe,
       });
 
-      if (!res.valid || !res.user) {
+      if (!res.valid) {
         if (res.message === NO_ACCESS_MSG) {
           setNoAccess(true);
         } else {
@@ -91,15 +95,34 @@ export default function LoginPage() {
         return;
       }
 
-      if (res.nextStep === 'done') {
-        // Bypass mode: token already issued
-        setAuth(res.user.token!, res.user as AuthUser);
-        navigate('/', { replace: true });
+      // IS_BYPASS = 0 users get a second factor. Both of those steps come back with
+      // `user: null` on purpose - no JWT exists yet - so the nextStep MUST be checked
+      // BEFORE looking at res.user. Treating the missing user as a failure here is what
+      // made the authenticator screen unreachable.
+      if (res.nextStep === 'enroll_otp') {
+        if (res.otpProvisioningUri && res.otpSecret) {
+          setEnroll({ uri: res.otpProvisioningUri, secret: res.otpSecret });
+          setOtp('');
+          setStep('enroll');
+        } else {
+          setError('Could not start authenticator setup. Please try again.');
+        }
         return;
       }
 
-      // require_otp or enroll_otp → show the OTP step
-      setStep('otp');
+      if (res.nextStep === 'require_otp') {
+        setOtp('');
+        setStep('otp');
+        return;
+      }
+
+      // Bypass mode: token already issued.
+      if (res.user?.token) {
+        setAuth(res.user.token, res.user as AuthUser);
+        navigate('/', { replace: true });
+      } else {
+        setError('Sign-in could not be completed. Please try again.');
+      }
     } catch (err) {
       if (err instanceof ApiError && err.message === NO_ACCESS_MSG) setNoAccess(true);
       else setError(err instanceof ApiError ? err.message : 'Login failed');
@@ -114,19 +137,30 @@ export default function LoginPage() {
     setNoAccess(false);
     setLoading(true);
     try {
+      // The enroll screen completes enrollment with the same call: the first valid code
+      // is what flips IS_GOOGLE_AUTHENTICATED to 1 on the server.
       const res = await api.post<LoginResponse>('/api/auth/verify-otp', { username, code: otp });
       if (res.valid && res.user?.token) {
         setAuth(res.user.token, res.user as AuthUser);
         navigate('/', { replace: true });
       } else {
         setError(res.message || 'Invalid or expired OTP');
+        setOtp('');
       }
     } catch (err) {
       if (err instanceof ApiError && err.message === NO_ACCESS_MSG) setNoAccess(true);
       else setError(err instanceof ApiError ? err.message : 'OTP verification failed');
+      setOtp('');
     } finally {
       setLoading(false);
     }
+  };
+
+  const backToCredentials = () => {
+    setStep('credentials');
+    setOtp('');
+    setEnroll(null);
+    setError('');
   };
 
   // One notice slot, shared by both steps, so the three states can never drift
@@ -221,6 +255,12 @@ export default function LoginPage() {
                 <h1 className="login-title">Verify it&rsquo;s you</h1>
                 <p className="login-sub">A one-time code keeps the account closed to strangers.</p>
               </>
+            ) : step === 'enroll' ? (
+              <>
+                <div className="otp-badge"><Icon name="shield" size={22} /></div>
+                <h1 className="login-title">Set up your authenticator</h1>
+                <p className="login-sub">One-time passcodes for <b>{username}</b></p>
+              </>
             ) : (
               <>
                 <h1 className="login-title">Welcome Back</h1>
@@ -302,8 +342,23 @@ export default function LoginPage() {
               </form>
             ) : (
               <form onSubmit={submitOtp}>
+                {step === 'enroll' && enroll && (
+                  <div className="otp-enroll">
+                    <ol className="otp-steps">
+                      <li>Open <b>Google Authenticator</b> (or any TOTP app) on your phone.</li>
+                      <li>Tap <b>+</b> → <b>Scan a barcode</b>, then scan this code.</li>
+                      <li>Enter the 6-digit code it shows below.</li>
+                    </ol>
+                    <div className="otp-qr">
+                      <QRCodeSVG value={enroll.uri} size={176} level="M" includeMargin />
+                    </div>
+                  </div>
+                )}
+
                 <p className="otp-note">
-                  Enter the 6-digit code from Google Authenticator for <b>{username}</b>
+                  {step === 'enroll'
+                    ? 'Enter the 6-digit code now showing in your app'
+                    : `Enter the 6-digit code from Google Authenticator for ${username}`}
                 </p>
                 <input
                   className="otp-input"
@@ -322,11 +377,13 @@ export default function LoginPage() {
                       <span className="spinner" aria-hidden="true" />
                       Verifying…
                     </>
+                  ) : step === 'enroll' ? (
+                    'Finish Setup & Sign In'
                   ) : (
                     'Verify & Sign In'
                   )}
                 </button>
-                <button type="button" className="btn link full" onClick={() => setStep('credentials')}>
+                <button type="button" className="btn link full" onClick={backToCredentials}>
                   ← Back to sign in
                 </button>
               </form>

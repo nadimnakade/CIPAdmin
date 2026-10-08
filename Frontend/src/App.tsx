@@ -28,6 +28,8 @@ import DialerLivePage from './pages/DialerLivePage';
 import LimitRequestsPage from './pages/LimitRequestsPage';
 import MenuMasterPage from './pages/MenuMasterPage';
 import AccessControlPage from './pages/AccessControlPage';
+import AuthenticatorAdminPage from './pages/AuthenticatorAdminPage';
+import ErrorLogsPage from './pages/ErrorLogsPage';
 import SettingsPage from './pages/SettingsPage';
 import TopProgressBar from './components/TopProgressBar';
 import ToastStack from './components/ToastStack';
@@ -97,6 +99,8 @@ export default function App() {
           <Route path="limit-requests" element={<LimitRequestsPage />} />
           <Route path="menu-master" element={<MenuMasterPage />} />
           <Route path="access-control" element={<AccessControlPage />} />
+          <Route path="authenticator-setup" element={<AuthenticatorAdminPage />} />
+          <Route path="error-logs" element={<ErrorLogsPage />} />
           <Route path="role-master" element={<RoleMasterPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

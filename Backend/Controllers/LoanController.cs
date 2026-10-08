@@ -106,7 +106,7 @@ public class LoanController : ControllerBase
             WHERE cc.COMPANY_NAME LIKE @q
               AND EXISTS (
                     SELECT 1 FROM dbo.TBL_CIP_ELIGIBILITY_CONFIG ec
-                    WHERE ec.EG_BANK_KEY = cc.COMPANY_BANK_KEY
+                    WHERE ec.EG_BANK_KEY = cc.COMPANY_BANK_ID
                       AND ec.EG_TENURE IN (12, 24, 36, 48, 60))
             GROUP BY cc.COMPANY_KEY, cc.COMPANY_NAME
             ORDER BY cc.COMPANY_NAME",

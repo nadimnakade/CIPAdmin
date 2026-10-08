@@ -163,8 +163,9 @@ END
 GO
 
 /* ------------------------- 5. Demo seed data ------------------------------
-   DIDs +91 98765 43210..43214 are assigned to the first five ACTIVE employees;
-   43215 stays as the generic/shared row. Adjust or delete freely.            */
+   DIDs +91 98765 43210..43214 are assigned to the first five on-roll,
+   non-deleted, non-CONNECTOR employees; 43215 stays as the generic/shared row.
+   Adjust or delete freely.                                                  */
 IF NOT EXISTS (SELECT 1 FROM dbo.TBL_CIP_EMPLOYEE_DID WHERE DID_NUMBER = '+919876543215')
     INSERT INTO dbo.TBL_CIP_EMPLOYEE_DID (EMP_CODE, DID_NUMBER, DID_STATUS, CREATED_BY)
     VALUES (NULL, '+919876543215', 'Active', 10);
@@ -174,7 +175,10 @@ GO
     SELECT TOP 5 EMP_CODE,
            ROW_NUMBER() OVER (ORDER BY EMP_CODE) AS rn
     FROM dbo.TBL_CIP_EMPLOYEE_MASTER
-    WHERE ISNULL(ACTIVE, 0) = 1
+    WHERE LAST_WORKING_DATE IS NULL
+      AND ISNULL(IS_DELETED, 0) = 0
+      AND ISNULL(ROLE_ID, 0) <> 2010
+      AND ISNULL(DESIG_ID, 0) <> 1014
     ORDER BY EMP_CODE
 )
 INSERT INTO dbo.TBL_CIP_EMPLOYEE_DID (EMP_CODE, DID_NUMBER, DID_STATUS, CREATED_BY)

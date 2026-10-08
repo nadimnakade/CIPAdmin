@@ -27,33 +27,57 @@ public class CibilController : ControllerBase
     /// <summary>Role 1 = SUPER ADMIN, 2 = ADMIN (see TBL_CIP_ROLE_MASTER).</summary>
     private bool IsAdmin => RoleId is 1 or 2;
 
-    /// <summary>Check whether a report for a PAN already exists (optionally only this month's).</summary>
+    /// <summary>Check whether a report for a PAN already exists (optionally only this month's).
+    /// Also reports the latest pull ATTEMPT when no report exists: a failed attempt this
+    /// month freezes the PAN (Blocked=true) and only admins may re-pull (CanRePull).
+    /// The failure reason is redacted for non-admins.
+    /// Duplicate/popup state is per USER: only the caller's own attempts freeze the PAN
+    /// for them (PulledByMe gates the download popup), so user B pulling a PAN user A
+    /// already did gets no report — Generate serves it from cache instead. A PENDING
+    /// pull in flight by anyone still blocks, because vendor credits are shared.</summary>
     [HttpPost("check")]
     public async Task<ActionResult<CibilCheckResponse>> Check([FromBody] CibilCheckRequest request)
     {
         var report = await _cibil.FindByPanAsync(request.Pan, request.ReportType, currentMonthOnly: true);
+        var ownAttempt = await _cibil.FindLastAttemptAsync(request.Pan, request.ReportType, EmpCode);
+        var attempt = report == null ? ownAttempt : null;
+        if (attempt != null && !IsAdmin) attempt.ErrorMessage = null; // failure reason is admin-only
         return Ok(new CibilCheckResponse
         {
             Exists = report != null,
             Report = report,
-            Message = report == null
-                ? null
-                : $"A CIBIL report for PAN {request.Pan.ToUpperInvariant()} already exists this month ({report.FileName})."
+            LastAttempt = attempt,
+            Blocked = attempt != null,
+            // The caller has their OWN successful pull for this PAN this month (direct
+            // or cache-served) — only then may the UI offer the file back. Someone
+            // else's pull never triggers the popup. Reports pulled before the ledger
+            // existed have no OK row, so the report's owner (PULLED_BY) counts too.
+            PulledByMe = ownAttempt?.Status == "OK"
+                || (report != null && await _cibil.GetPulledByAsync(report.ReportId) == EmpCode),
+            CanRePull = IsAdmin,
+            Message = report != null
+                ? $"A CIBIL report for PAN {request.Pan.ToUpperInvariant()} already exists this month ({report.FileName})."
+                : attempt == null
+                    ? null
+                    : CibilService.DuplicateBlockMessage(attempt, IsAdmin)
         });
     }
 
     /// <summary>
     /// Generate (pull) a CIBIL report.
-    /// Rules: one report per PAN per month for everyone (existing PDF is returned);
+    /// Rules: one pull per PAN per month for everyone, whatever the previous attempt's
+    /// status (existing PDF is returned; a FAILED attempt blocks with 409 DUPLICATE_PULL);
     /// regular users max Cibil:MonthlyPullLimit (default 50) pulls per month (403 beyond);
-    /// admins may pass regenerate=true to replace this month's report with a fresh pull.
+    /// re-pulls (regenerate=true) are admin-only — non-admins get 403 RE-PULL_ADMIN_ONLY.
     /// </summary>
     [HttpPost("generate")]
     public async Task<ActionResult<CibilGenerateResponse>> Generate([FromBody] CibilRequest request, [FromQuery] bool regenerate = false, CancellationToken ct = default)
     {
         try
         {
-            var res = await _cibil.GenerateAsync(request, EmpCode, EmpName, IsAdmin, regenerate && IsAdmin, ct);
+            // regenerate is passed through as-is: the SERVICE refuses it for non-admins,
+            // so the rule cannot be bypassed by a future caller of the service.
+            var res = await _cibil.GenerateAsync(request, EmpCode, EmpName, IsAdmin, regenerate, ct);
             return Ok(res);
         }
         catch (QuotaExceededException ex)
@@ -65,6 +89,22 @@ public class CibilController : ControllerBase
                 existingReport = ex.ExistingReport,
                 hasPendingRequest = ex.HasPendingRequest,
                 code = "QUOTA_EXCEEDED"
+            });
+        }
+        catch (RePullForbiddenException ex)
+        {
+            return StatusCode(403, new { error = ex.Message, code = "RE-PULL_ADMIN_ONLY" });
+        }
+        catch (DuplicatePullBlockedException ex)
+        {
+            // The vendor's error text on the blocking attempt is admin-only.
+            if (!IsAdmin) ex.Attempt.ErrorMessage = null;
+            return StatusCode(409, new
+            {
+                error = ex.Message,
+                code = "DUPLICATE_PULL",
+                lastAttempt = ex.Attempt,
+                canRePull = IsAdmin
             });
         }
         catch (RegenerateBlockedException ex)
@@ -103,6 +143,14 @@ public class CibilController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 2601 or 2627)
+        {
+            // UX_CIBIL_LIMIT_REQ_PENDING rejected a second Pending request for the same
+            // employee and month. This is a normal outcome of a double submit racing the
+            // HasPendingLimitRequestAsync read, not a server fault - report it as the same
+            // 400 the pre-check raises, so the user sees one consistent message.
+            return BadRequest(new { error = "You already have a pending request for this month. Wait for the administrator's decision." });
         }
     }
 

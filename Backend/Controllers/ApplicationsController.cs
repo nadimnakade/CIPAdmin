@@ -87,8 +87,15 @@ public class ApplicationsController : ControllerBase
             p => p.AddWithValue("@a", flag));
         var list = new List<Option>();
         foreach (DataRow r in dt.Rows)
-            list.Add(new Option(ToInt(r[0]), r[1]?.ToString() ?? ""));
-        return list;
+        {
+            var id = ToInt(r[0]);
+            var name = r[1]?.ToString() ?? "";
+            if (id <= 0 || name.Length == 0 || name.StartsWith("---", StringComparison.Ordinal)) continue;
+            list.Add(new Option(id, name));
+        }
+        if (!string.Equals(flag, "FExecutiveName", StringComparison.Ordinal)) return list;
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, list.Select(option => option.Id));
+        return list.Where(option => eligible.Contains(option.Id)).ToList();
     }
 
     [HttpPost("supervisors")]
@@ -112,17 +119,12 @@ public class ApplicationsController : ControllerBase
                 p.AddWithValue("@b", body.BranchId);
             });
 
-        var list = new List<Option>();
-        foreach (DataRow r in dt.Rows)
-        {
-            // Columns are EMP_CODE, EMP_NAME with no aliases; the leading row is the
-            // procedure's own placeholder, which the page renders itself.
-            if (!int.TryParse(r[0]?.ToString(), out var code) || code == 0) continue;
-            var name = r[1]?.ToString()?.Trim() ?? "";
-            if (name.StartsWith("---", StringComparison.Ordinal) || name.Length == 0) continue;
-            list.Add(new Option(code, name));
-        }
-        return Ok(list);
+        var raw = dt.Rows.Cast<DataRow>()
+            .Select(r => new Option(ToInt(r[0]), r[1]?.ToString()?.Trim() ?? ""))
+            .Where(option => option.Id > 0 && option.Name.Length > 0 && !option.Name.StartsWith("---", StringComparison.Ordinal))
+            .ToList();
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, raw.Select(option => option.Id));
+        return Ok(raw.Where(option => eligible.Contains(option.Id)).ToList());
     }
 
     private async Task<List<Option>> BranchDropdownAsync(string flag, int branchId, int? supervisorId)
@@ -137,15 +139,14 @@ public class ApplicationsController : ControllerBase
                     ? (object)supervisorId.Value.ToString()
                     : "");
             });
-        var list = new List<Option>();
-        foreach (DataRow r in dt.Rows)
-        {
-            var id = ToInt(r[0]);
-            var name = r[1]?.ToString() ?? "";
-            if (id <= 0 && (name.Length == 0 || name.StartsWith("---", StringComparison.Ordinal))) continue;
-            list.Add(new Option(id, name));
-        }
-        return list;
+        var raw = dt.Rows.Cast<DataRow>()
+            .Select(r => new Option(ToInt(r[0]), r[1]?.ToString()?.Trim() ?? ""))
+            .Where(option => option.Id > 0 && option.Name.Length > 0 && !option.Name.StartsWith("---", StringComparison.Ordinal))
+            .ToList();
+        // BranchDropdownAsync currently serves only FSupervisor; its IDs are employee
+        // codes, unlike the FLocation/ FDesignation master lookups.
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, raw.Select(option => option.Id));
+        return raw.Where(option => eligible.Contains(option.Id)).ToList();
     }
 
     /// <summary>
@@ -169,6 +170,30 @@ public class ApplicationsController : ControllerBase
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 200);
         var start = (page - 1) * pageSize;
+
+        try
+        {
+            return Ok(await SearchCoreAsync(search, loginRegion, bank, caller, supervisor,
+                status, appDate, sortCol, sortDir, start, pageSize));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "USP_CIP_GET_CLIENT_DETAILS_CUSTOM_PAGING failed");
+            // Handed to the error-log middleware so this 500 lands on the admin Error Log
+            // screen. A CAUGHT exception never reaches the global exception handler, so
+            // without this the two endpoints most likely to fail would be the two least
+            // likely to be recorded. The exception itself is stashed, not just its
+            // message, so the row keeps the SQL error number and stack trace.
+            HttpContext.Items["cip.errorException"] = ex;
+            return StatusCode(500, new { error = DbError(ex), detail = Explain(ex) });
+        }
+    }
+
+    private async Task<object> SearchCoreAsync(
+        string? search, string? loginRegion, string? bank, string? caller, string? supervisor,
+        string? status, string? appDate, int sortCol, string? sortDir, int start, int pageSize)
+    {
+        int page = start / pageSize + 1;
 
         var dt = await _db.QueryAsync(@"
             EXEC dbo.USP_CIP_GET_CLIENT_DETAILS_CUSTOM_PAGING
@@ -239,7 +264,7 @@ public class ApplicationsController : ControllerBase
 
         // The procedure carries the unpaged total on every row via COUNT(*) OVER().
         var total = dt.Rows.Count > 0 ? ToInt(dt.Rows[0]["TotalCount"]) : 0;
-        return Ok(new { total, page, pageSize, rows });
+        return new { total, page, pageSize, rows };
     }
 
     /// <summary>Load one application for editing (the legacy "FE" fetch).</summary>
@@ -344,6 +369,10 @@ public class ApplicationsController : ControllerBase
     public async Task<IActionResult> Save([FromBody] ApplicationUpsert body)
     {
         var errors = Validate(body);
+        errors.AddRange(await ValidateEmployeeAssignmentsAsync(
+            ("Telecaller", body.TelecallerId),
+            ("Supervisor", body.SupervisorId),
+            ("Executive", body.ExecutiveName)));
         if (errors.Count > 0) return BadRequest(new { error = string.Join(" ", errors), fields = errors });
 
         // The procedure inserts on "I" and updates on "E"; the legacy controller chose
@@ -504,6 +533,16 @@ public class ApplicationsController : ControllerBase
     /// blocks in the bulk controller were commented out, and the single form validated
     /// only that a bank was chosen.
     /// </summary>
+    private async Task<List<string>> ValidateEmployeeAssignmentsAsync(params (string Field, int? Code)[] assignments)
+    {
+        var supplied = assignments.Where(assignment => assignment.Code is > 0).ToArray();
+        var eligible = await EmployeeFilters.FilterActiveCodesAsync(_db, supplied.Select(assignment => assignment.Code!.Value));
+        return supplied
+            .Where(assignment => !eligible.Contains(assignment.Code!.Value))
+            .Select(assignment => $"{assignment.Field} must be an active, non-connector employee.")
+            .ToList();
+    }
+
     private static List<string> Validate(ApplicationUpsert b)
     {
         var e = new List<string>();
@@ -710,6 +749,26 @@ public class ApplicationsController : ControllerBase
         if (tvp.Rows.Count == 0)
             return BadRequest(new { error = "No usable rows found.", details = blank });
 
+        var assignmentCodes = new List<(int Row, string Field, int Code)>();
+        for (var i = 0; i < tvp.Rows.Count; i++)
+        {
+            foreach (var field in new[] { "TELECALLER_ID", "SUPERVISOR_ID", "ExecutiveName" })
+            {
+                var value = tvp.Rows[i][field]?.ToString()?.Trim();
+                if (int.TryParse(value, out var code) && code > 0)
+                    assignmentCodes.Add((i + 2, field, code));
+            }
+        }
+        var eligibleAssignments = await EmployeeFilters.FilterActiveCodesAsync(
+            _db, assignmentCodes.Select(assignment => assignment.Code));
+        var invalidAssignments = assignmentCodes
+            .Where(assignment => !eligibleAssignments.Contains(assignment.Code))
+            .Select(assignment => $"Row {assignment.Row}: {assignment.Field} employee {assignment.Code} is inactive, deleted, or a CONNECTOR.")
+            .Take(100)
+            .ToList();
+        if (invalidAssignments.Count > 0)
+            return BadRequest(new { error = "The spreadsheet contains ineligible employee assignments; no rows were uploaded.", details = invalidAssignments });
+
         try
         {
             using var conn = new SqlConnection(_db.ConnectionString);
@@ -791,6 +850,20 @@ public class ApplicationsController : ControllerBase
     [HttpGet("existing-loans")]
     public async Task<ActionResult<object>> ExistingLoans()
     {
+        try
+        {
+            return Ok(await ExistingLoansCoreAsync());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "USP_CIP_EXISTINGLOAN_DETAILS (F) failed");
+            HttpContext.Items["cip.errorException"] = ex;
+            return StatusCode(500, new { error = DbError(ex), detail = Explain(ex) });
+        }
+    }
+
+    private async Task<object> ExistingLoansCoreAsync()
+    {
         var ds = await _db.QuerySetAsync(
             "EXEC dbo.USP_CIP_EXISTINGLOAN_DETAILS @Action='F', @CREATED_BY=@by, " +
             "@TBL_CIP_CLIENT_EXISTINGLOAN_DETAILS_Type=@tvp",
@@ -821,7 +894,7 @@ public class ApplicationsController : ControllerBase
                     outstandingLoanAmt = Str(r["OutstandingLoanAmt"]),
                 });
 
-        return Ok(new { rows });
+        return new { rows };
     }
 
     /// <summary>
@@ -954,6 +1027,45 @@ public class ApplicationsController : ControllerBase
     // ------------------------------------------------------------------- helpers
 
     private static string Str(object? v) => v == null || v == DBNull.Value ? "" : v.ToString() ?? "";
+
+    /// <summary>
+    /// Turn a SQL failure into something an operator can act on.
+    /// A missing legacy object is not always a SqlException: setting TypeName on a
+    /// SqlParameter whose table type does not exist throws ArgumentException from the
+    /// client before any round trip, so the message text has to be checked too.
+    /// </summary>
+    private static string DbError(Exception ex)
+    {
+        // Match the TEXT first. A missing TVP type arrives as a SqlException whose number
+        // is not 2715/208, so a number-only switch falls through to the generic message and
+        // hides the one clue that identifies the cause.
+        var m = ex.Message;
+        if (m.Contains("Cannot find data type", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("Could not find stored procedure", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase))
+            return MissingObject;
+
+        if (ex is SqlException sql)
+            return sql.Number switch
+            {
+                // 2812 "Could not find stored procedure", 2715/2714 table type or column,
+                // 208/207 invalid object or column: the deployed database is missing a
+                // legacy CIP object. Name it, because that is the whole diagnosis.
+                2812 or 2715 or 2714 or 208 or 207 => MissingObject,
+                229 => "Permission denied on the database object.",
+                2627 or 2601 => "That record already exists.",
+                _ => "The database rejected the request.",
+            };
+
+        return "The request could not be completed.";
+    }
+
+    private const string MissingObject =
+        "This database is missing a legacy CIP object. Run DIAGNOSE-500.sql to find which.";
+
+    /// <summary>The underlying message, so the cause is visible without server logs.</summary>
+    private static string Explain(Exception ex) => ex.Message;
 
     /// <summary>
     /// Tolerant column read. USP_CIP_GET_CLIENT_DETAILS returns APP_DATE twice, so the

@@ -14,6 +14,7 @@ server that may already be partly up to date.
 | 4 | `Backend/sql/CIBIL-PULL-LOG.sql` | `TBL_CIP_CIBIL_PULL_LOG` |
 | 5 | `Backend/sql/APPLICATION-MODULES-MENU.sql` | Applications section (2000) + children 2001–2007, and their role grants |
 | 6 | `Backend/sql/PUNCHIN-MENU.sql` | Attendance section (3000) + Punch In / Out (3001), and their role grants |
+| 7 | `Backend/sql/AUTHENTICATOR-ADMIN-MENU.sql` | "Authenticator Setup" admin menu (2100), granted to SUPER ADMIN + ADMIN |
 
 Optional — only if you use those screens:
 
@@ -42,18 +43,41 @@ sqlcmd exits 0 even when a statement fails.
 ### The exact command line
 
 ```bash
-# 1..6 in order
+# 1..7 in order
 for f in Database/schema.sql \
          Backend/sql/USER-SINGLE-SESSION.sql \
          Backend/sql/TBL_CIP_APP_SETTINGS.sql \
          Backend/sql/CIBIL-PULL-LOG.sql \
          Backend/sql/APPLICATION-MODULES-MENU.sql \
-         Backend/sql/PUNCHIN-MENU.sql ; do
+         Backend/sql/PUNCHIN-MENU.sql \
+         Backend/sql/AUTHENTICATOR-ADMIN-MENU.sql ; do
   echo "== $f"
   sqlcmd -S tcp:YOUR-SQL-HOST,1433 -d CIP -U sa -P **** -C -b -h -1 -W -l 30 -i "$f" \
     || { echo "FAILED at $f — stop and do not copy the package"; break; }
 done
 ```
+
+### Rolling out the authenticator
+
+The authenticator is driven per employee by `IS_BYPASS`, and on the current data
+**every employee has `IS_BYPASS = 1`**, so after this migration nobody is asked for a
+code yet. That is the safe default — turn it on deliberately, one account at a time,
+from **Authenticator Setup** (SUPER ADMIN / ADMIN only) or in SQL:
+
+```sql
+-- Require the authenticator for one employee. They will see a QR code at next login.
+UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER
+   SET IS_BYPASS = 0, IS_GOOGLE_AUTHENTICATED = 0, GOOGLE_AUTH_SECRET_KEY = NULL
+ WHERE USERNAME = 'some.user';
+
+-- Lost phone: clear the secret so they re-scan a QR. Leave IS_BYPASS alone.
+UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER
+   SET IS_GOOGLE_AUTHENTICATED = 0, GOOGLE_AUTH_SECRET_KEY = NULL
+ WHERE USERNAME = 'some.user';
+```
+
+`DEPLOY-CHECK.sql` prints an `OTP USAGE` line reporting how many employees currently
+skip the authenticator, so you can confirm the rollout state from the pre-flight.
 
 ## What to deploy
 
@@ -194,6 +218,73 @@ release's UI.
   `user`, and `LoginPage` treats a missing `user` as failure — so the OTP screen is
   never reached. Super Admin / bypass accounts are unaffected. Fix before enabling
   OTP for any role.
+  **Fixed in this release** — the client now branches on `nextStep` before looking at
+  `user`, and the enrollment secret is persisted before the QR is shown.
+
+## Troubleshooting: `GET /api/applications` returns 500
+
+Work through these in order. Stop at the first one that identifies the cause.
+
+**Step 1 — `Backend/sql/DIAGNOSE-500.sql`** (read-only). Reports whether
+`USP_CIP_GET_CLIENT_DETAILS_CUSTOM_PAGING`, `USP_CIP_EXISTINGLOAN_DETAILS` and the
+tables they read exist, with row counts and a `missing_procs` / `missing_tables`
+summary. Anything non-zero is a genuinely incomplete database restore.
+
+If this reports **0 missing but the API still 500s**, the objects are present and the
+cause is something else. Go to step 2 — restoring the procs will not help.
+
+**Step 2 — `Backend/sql/VERIFY-SIGNATURES.sql`** (read-only). An object can exist and
+still be uncallable. This checks, in order:
+
+1. **Which SQL login you are connected as.** This is usually the whole answer. Run it
+   as `sa` and it proves nothing about the API's permissions; edit the `@app_login`
+   variable at the top to the `User ID` in the deployed `appsettings.json`
+   `ConnectionStrings:Default` and re-run as that login.
+2. **`EXECUTE` permission** on both procs, via `HAS_PERMS_BY_NAME` (resolves
+   inherited grants through roles, which is what actually decides access).
+3. **The TVP `dbo.TBL_CIP_CLIENT_EXISTINGLOAN_DETAILS_Type`.** User-defined table
+   types live in `sys.types`, not `sys.objects`, so **no object-based diagnostic can
+   report a missing one** — including `DIAGNOSE-500.sql`. A missing type breaks only
+   `/api/applications/existing-loans`, which is a distinctive symptom.
+4. **Parameter signatures** for both procs, matched by name against what the C# binds.
+5. **Cross-database / linked-server references** inside the procedure bodies.
+6. **A live `EXEC` of both procedures**, exactly as the API calls them, inside
+   `TRY/CATCH`. This is the authoritative check: it prints the real
+   `ERROR_NUMBER()` and message instead of guessing. Edit `@emp` to a real
+   `empCode` (Admin is 10) — the paging proc builds a temp hierarchy from that user.
+
+**Step 3 — if the objects all exist but the API still 500s, run
+`Backend/sql/FIND-APP-DB.sql`.** This is the case where SSMS works and the API does
+not, and the difference is always the connection context. Edit the three variables at
+the top (`@AppLogin`, `@AppDatabase`, `@AppServer`) to the values from the DEPLOYED
+`appsettings.json` — the one sitting next to `CIPAdmin.Backend.exe` on the server,
+not the repository copy — then run it. It tests, in order:
+
+1. **Wrong database or server.** The connection string may name a DB where these procs
+   genuinely do not exist, which makes every result in SSMS true *and* the 500 real.
+2. **Permissions, impersonated.** It uses `EXECUTE AS USER` so you do not have to
+   reconnect SSMS as the app login, then actually **runs both procedures as that
+   login** and reports the real SQL error. Do not trust `HAS_PERMS_BY_NAME` here: under
+   impersonation it returns NULL even when the grant exists and the call succeeds.
+   Note the TVP needs its own grant — `GRANT EXECUTE ON TYPE::dbo.<Type> TO <login>` —
+   and without it only `/existing-loans` fails, which looks identical to a missing object.
+3. **Command timeout.** The app uses 60s (180s for existing-loans); SSMS has none, so
+   a slow procedure succeeds in SSMS and dies in the app.
+
+**Step 4 — read the response.** The current build returns a JSON body on an unhandled
+exception, so the browser or curl shows the actual cause instead of a blank 500:
+
+```json
+{ "error": "...", "detail": "...", "sqlErrorNumber": 2812 }
+```
+
+`sqlErrorNumber` `262`/`297`/`300` mean permissions; `2812` a missing procedure;
+`2715`/`208` a missing type or table. An **empty** body means an **older build** is
+deployed — redeploy and retry.
+
+**Step 5 — the server log.** IIS swallows stdout unless logging is configured. Check
+the IIS log for the request, and enable failed-request tracing or stdout logging for
+the application pool if you need the stack trace.
 
 ## Where things live
 
@@ -203,6 +294,17 @@ release's UI.
 | `publish/frontend/` | SPA, baked for base `/CIPadmin/`, API `/CIPAdmin_API` |
 | `publish/backend/` | .NET publish, `PathBase=/CIPAdmin_API`, `Swagger.Enabled=false` |
 | `Backend/sql/DEPLOY-CHECK.sql` | Read-only pre-flight probe |
+| `Backend/sql/ERROR-LOG.sql` | Creates `TBL_CIP_API_ERROR_LOG` (admin Error Log screen) |
+| `Backend/sql/ERROR-LOG-MENU.sql` | Adds the admin "Error Log" menu (run after ERROR-LOG.sql) |
+| `Backend/sql/test-error-log.sh` | End-to-end test: breaks a proc on purpose, asserts it is captured |
+| `Backend/sql/DIAGNOSE-500.sql` | Read-only: do the legacy procs/tables exist at all? |
+| `Backend/sql/VERIFY-SIGNATURES.sql` | Read-only: if the objects exist but the API still 500s, run this |
+| `Backend/sql/FIND-APP-DB.sql` | Read-only: finds why SSMS works but the API 500s (wrong DB, permissions, timeout) |
+| `Backend/sql/AUTHENTICATOR-ADMIN-MENU.sql` | Authenticator Setup menu (run after PUNCHIN-MENU.sql) |
+| `Backend/sql/LIMIT-REQUEST-DEDUPE.sql` | One pending CIBIL limit request per employee per month (unique filtered index). Idempotent; reports existing duplicates instead of failing. |
+| `Backend/sql/CIBIL-DEDUPE-FAILED.sql` | Freezes a PAN for the rest of the month after ANY pull attempt (success or failure): attempt-lookup index, admin-only `ERROR_MESSAGE` column, unique in-flight guard. Idempotent; run after CIBIL-PULL-LOG.sql. |
+| `Backend/sql/otp-selftest.sql` | Test fixture: 3 employees covering every authenticator branch |
+| `Backend/sql/otp-e2e-test.py` | End-to-end authenticator test against a running backend |
 | `Backend/sql/build-deploy.sh` | One-shot clean build + zip |
 | `Backend/sql/smoke-test-publish.sh` | Checks the built package actually serves and logs in |
 | `Backend/sql/make-deploy-zip.sh` | Zips the two publish folders |

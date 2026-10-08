@@ -47,6 +47,8 @@ SELECT 'MENU       ' + want.MENU_LABEL AS item,
                THEN 'Backend/sql/FINANCIAL-ANALYSIS-MENU.sql'
            WHEN m.MENU_ID IS NULL AND want.MENU_LABEL LIKE 'New Tax Regime%'
                THEN 'Backend/sql/NEW-TAX-REGIME-MENU.sql'
+           WHEN m.MENU_ID IS NULL AND want.MENU_PATH = '/authenticator-setup'
+               THEN 'Backend/sql/AUTHENTICATOR-ADMIN-MENU.sql'
            ELSE '-'
        END AS action
 FROM (VALUES
@@ -60,6 +62,7 @@ FROM (VALUES
     ('Existing Loans',            '/applications/existing-loans'),
     ('Punch In / Out',            '/punch-in'),
     ('Financial Analysis',        '/financial-analysis'),
+    ('Authenticator Setup',       '/authenticator-setup'),
     ('New Tax Regime Calculator', 'https://cleartax.in/paytax/')
 ) AS want(MENU_LABEL, MENU_PATH)
 LEFT JOIN dbo.TBL_CIP_MENU_MASTER m
@@ -164,7 +167,37 @@ FROM (VALUES
 ) AS p(name)
 ORDER BY CASE WHEN OBJECT_ID('dbo.' + p.name, 'P') IS NULL THEN 0 ELSE 1 END, p.name;
 
-/* ---------- 5. Summary ---------- */
+/* ---------- 5. Authenticator (Google Authenticator) columns ----------
+   The second factor needs all three columns on TBL_CIP_EMPLOYEE_MASTER. Without
+   IS_BYPASS the login cannot tell "skip the authenticator" from "require it". */
+SELECT 'OTP COLUMN ' + want.COLUMN_NAME AS item,
+       CASE WHEN c.COLUMN_NAME IS NULL THEN 'MISSING' ELSE 'present' END AS status,
+       'pre-existing (legacy CIP schema)' AS action
+FROM (VALUES
+    ('IS_BYPASS'),                   -- 1 = authenticator skipped, 0 = required
+    ('IS_GOOGLE_AUTHENTICATED'),     -- 1 = already enrolled
+    ('GOOGLE_AUTH_SECRET_KEY')       -- Base32 TOTP secret
+) AS want(COLUMN_NAME)
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS c
+       ON c.TABLE_NAME = 'TBL_CIP_EMPLOYEE_MASTER'
+      AND c.COLUMN_NAME = want.COLUMN_NAME
+ORDER BY CASE WHEN c.COLUMN_NAME IS NULL THEN 0 ELSE 1 END, want.COLUMN_NAME;
+
+/* ---------- 6. Authenticator rollout posture ----------
+   Informational, not a failure: with every employee on IS_BYPASS = 1 the
+   authenticator is dormant, which is the safe default but is rarely the intent
+   on a production rollout. */
+SELECT 'OTP USAGE  ' + CAST(SUM(CASE WHEN ISNULL(IS_BYPASS, 0) = 1 THEN 1 ELSE 0 END) AS VARCHAR(20)) +
+       ' of ' + CAST(COUNT(*) AS VARCHAR(20)) + ' employees skip the authenticator' AS item,
+       CASE WHEN SUM(CASE WHEN ISNULL(IS_BYPASS, 0) = 0 THEN 1 ELSE 0 END) = 0
+            THEN 'dormant' ELSE 'active' END AS status,
+       CASE WHEN SUM(CASE WHEN ISNULL(IS_BYPASS, 0) = 0 THEN 1 ELSE 0 END) = 0
+            THEN 'set IS_BYPASS = 0 per employee on the Authenticator Setup page'
+            ELSE 'authenticator is required for the employees counted as IS_BYPASS = 0' END AS action
+  FROM dbo.TBL_CIP_EMPLOYEE_MASTER
+ WHERE ISNULL(IS_DELETED, 0) = 0;
+
+/* ---------- 7. Summary ---------- */
 SELECT '--- run every migration whose row above says MISSING, then re-run this file ---' AS item,
        'next' AS status,
        'ORDER: schema.sql -> USER-SINGLE-SESSION -> TBL_CIP_APP_SETTINGS -> CIBIL-PULL-LOG -> menu scripts' AS action;

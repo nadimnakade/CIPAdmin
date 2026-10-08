@@ -100,7 +100,8 @@ public class MenuController : ControllerBase
     public async Task<ActionResult<object>> Roles()
     {
         var dt = await _db.QueryAsync(
-            "SELECT ROLE_ID, ROLE_NAME FROM dbo.TBL_CIP_ROLE_MASTER WHERE ISNULL(ROLE_ACTIVE,0) = 1 ORDER BY ROLE_ID");
+            "SELECT ROLE_ID, ROLE_NAME FROM dbo.TBL_CIP_ROLE_MASTER WHERE ISNULL(ROLE_ACTIVE,0) = 1 AND ROLE_ID <> @connector ORDER BY ROLE_ID",
+            p => p.AddWithValue("@connector", EmployeeFilters.ConnectorRoleId));
         var roles = dt.AsEnumerable()
             .Select(r => new { roleId = r.Field<int>("ROLE_ID"), roleName = r["ROLE_NAME"].ToString() })
             .ToList();
@@ -112,6 +113,8 @@ public class MenuController : ControllerBase
     [Authorize(Policy = "Admin")]
     public async Task<ActionResult<object>> ForRole(int roleId)
     {
+        if (roleId == EmployeeFilters.ConnectorRoleId)
+            return NotFound(new { error = "Role not found." });
         var dt = await _db.QueryAsync(
             "SELECT MENU_ID FROM dbo.TBL_CIP_ROLE_MENU WHERE ROLE_ID = @r",
             p => p.AddWithValue("@r", roleId));
@@ -124,6 +127,8 @@ public class MenuController : ControllerBase
     [Authorize(Policy = "Admin")]
     public async Task<IActionResult> SaveForRole(int roleId, [FromBody] RoleMenuSave body)
     {
+        if (roleId == EmployeeFilters.ConnectorRoleId)
+            return NotFound(new { error = "Role not found." });
         var roleExists = await _db.ScalarAsync(
             "SELECT COUNT(1) FROM dbo.TBL_CIP_ROLE_MASTER WHERE ROLE_ID = @r",
             p => p.AddWithValue("@r", roleId));

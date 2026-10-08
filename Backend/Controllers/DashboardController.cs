@@ -99,23 +99,34 @@ public class DashboardController : ControllerBase
             "SELECT COUNT(1) FROM dbo.TBL_CIP_CIBIL_REPORTS WHERE PULLED_DATE >= DATEADD(MONTH, -2, GETDATE()) AND PULLED_DATE < DATEADD(MONTH, -1, GETDATE())" + pullFilter,
             scope.IsAdmin ? null : scope.SubtreeCodes);
 
+        // "On roll" is decided by EmployeeFilters (LAST_WORKING_DATE IS NULL, connectors
+        // excluded) so this card cannot drift from the employee screens.
         res.ActiveEmployees = Convert.ToInt32(await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE ISNULL(ACTIVE, 0) = 1 AND ISNULL(IS_DELETED, 0) = 0" + empFilter));
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE " + EmployeeFilters.Active("e")
+            + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e") + empFilter));
         res.ActiveEmployeesDelta = 0;
 
         res.ActiveDids = Convert.ToInt32(await _db.ScalarAsync($@"
             SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_DID d
             JOIN dbo.TBL_CIP_EMPLOYEE_MASTER e ON e.EMP_CODE = d.EMP_CODE
-            WHERE ISNULL(d.IS_DELETED, 0) = 0 AND d.DID_STATUS = 'Active'{(scope.IsAdmin ? "" : $" AND e.EMP_CODE IN ({HierarchyService.InlineCodes(scope.SubtreeCodes)})")}"));
-        res.UnassignedDids = Convert.ToInt32(await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_DID WHERE ISNULL(IS_DELETED, 0) = 0 AND EMP_CODE IS NULL"));
+            WHERE ISNULL(d.IS_DELETED, 0) = 0 AND d.DID_STATUS = 'Active'
+              AND {EmployeeFilters.Active("e")} AND {EmployeeFilters.NotDeleted("e")} AND {EmployeeFilters.NotConnector("e")}{(scope.IsAdmin ? "" : $" AND e.EMP_CODE IN ({HierarchyService.InlineCodes(scope.SubtreeCodes)})")}"));
+        res.UnassignedDids = Convert.ToInt32(await _db.ScalarAsync(@"
+            SELECT COUNT(1)
+            FROM dbo.TBL_CIP_EMPLOYEE_DID d
+            WHERE ISNULL(d.IS_DELETED, 0) = 0 AND d.EMP_CODE IS NULL
+              AND (d.DID_STATUS IS NULL OR d.DID_STATUS = 'Active')"));
 
         // Dialer split: employees default to the OLD dialer (DIALER_VERSION NULL) until
         // an admin marks them as using the new dialer app (version recorded).
         res.OldDialerUsers = Convert.ToInt32(await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE ISNULL(ACTIVE, 0) = 1 AND ISNULL(IS_DELETED, 0) = 0 AND DIALER_VERSION IS NULL" + empFilter));
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE " + EmployeeFilters.Active("e")
+            + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e")
+            + " AND e.DIALER_VERSION IS NULL" + empFilter));
         res.NewDialerUsers = Convert.ToInt32(await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE ISNULL(ACTIVE, 0) = 1 AND ISNULL(IS_DELETED, 0) = 0 AND DIALER_VERSION IS NOT NULL" + empFilter));
+            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE " + EmployeeFilters.Active("e")
+            + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e")
+            + " AND e.DIALER_VERSION IS NOT NULL" + empFilter));
 
         // 7-day trend (0 for days with no pulls)
         var trendSql = $@"
@@ -171,7 +182,8 @@ public class DashboardController : ControllerBase
             int.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value, out var rr) ? rr : 0);
         var empFilter = scope.IsAdmin ? "" : $" AND e.EMP_CODE IN ({HierarchyService.InlineCodes(scope.SubtreeCodes)})";
 
-        var where = " WHERE ISNULL(e.IS_DELETED, 0) = 0 AND ISNULL(e.ACTIVE, 0) = 1" + empFilter;
+        var where = " WHERE " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e")
+            + " AND " + EmployeeFilters.NotConnector("e") + empFilter;
         if (group == "old") where += " AND e.DIALER_VERSION IS NULL";
         else if (group == "new") where += " AND e.DIALER_VERSION IS NOT NULL";
         if (!string.IsNullOrWhiteSpace(search))
@@ -215,8 +227,9 @@ public class DashboardController : ControllerBase
     public async Task<IActionResult> SetDialerVersion(int empCode, [FromBody] DialerVersionRequest body)
     {
         var affected = await _db.ExecuteAsync(
-            "UPDATE dbo.TBL_CIP_EMPLOYEE_MASTER SET DIALER_VERSION = @v, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE() " +
-            "WHERE EMP_CODE = @e AND ISNULL(IS_DELETED, 0) = 0",
+            "UPDATE e SET DIALER_VERSION = @v, MODIFIED_BY = @by, MODIFIED_DATE = GETDATE() " +
+            "FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e") +
+            " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p =>
             {
                 p.AddWithValue("@v", string.IsNullOrWhiteSpace(body.DialerVersion) ? (object)DBNull.Value : body.DialerVersion.Trim());

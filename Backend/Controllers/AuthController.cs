@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using CIPAdmin.Backend.Models;
@@ -67,6 +68,46 @@ public class AuthController : ControllerBase
         var res = await _auth.ExchangeSsoTicketAsync(ticket, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "", Request.Headers["User-Agent"].ToString());
         if (!res.Valid) return Unauthorized(res);
         return Ok(res);
+    }
+
+    /// <summary>Admin: clear an employee's authenticator enrollment, or flip their bypass flag.
+    /// Mirrors the legacy Verify/ResetGoogleAuth admin screen. Roles 1 and 2 only.
+    /// Resetting forces the user to re-scan a QR at next login; it never grants access
+    /// by itself, because IS_BYPASS is what decides that.</summary>
+    [HttpPost("admin/reset-otp")]
+    [Authorize]
+    public async Task<ActionResult> ResetOtp([FromBody] ResetOtpRequest request)
+    {
+        // Role claim is ClaimTypes.Role, matching every other controller.
+        var roleId = int.TryParse(User.FindFirst(ClaimTypes.Role)?.Value, out var r) ? r : 0;
+        if (!HierarchyService.IsAdminRole(roleId))
+            return StatusCode(403, new { message = "Not authorized" });
+
+        if (request.EmpCode <= 0)
+            return BadRequest(new { message = "Employee code is required" });
+
+        var res = await _auth.ResetAuthenticatorAsync(
+            request.EmpCode,
+            request.ClearSecret,
+            request.SetBypass,
+            HttpContext.Connection.RemoteIpAddress?.ToString() ?? "");
+
+        if (!res.Found) return NotFound(new { message = "Employee not found" });
+        return Ok(res);
+    }
+
+    /// <summary>Admin: list employees with their authenticator/bypass state, for the admin screen.</summary>
+    [HttpGet("admin/auth-status")]
+    [Authorize]
+    public async Task<ActionResult> AuthStatus([FromQuery] string? q, [FromQuery] int take = 50)
+    {
+        var roleId = int.TryParse(User.FindFirst(ClaimTypes.Role)?.Value, out var r) ? r : 0;
+        if (!HierarchyService.IsAdminRole(roleId))
+            return StatusCode(403, new { message = "Not authorized" });
+
+        take = Math.Clamp(take, 1, 200);
+        var rows = await _auth.GetAuthenticatorStatusAsync(q, take);
+        return Ok(rows);
     }
 
     /// <summary>Current session info from the JWT.</summary>

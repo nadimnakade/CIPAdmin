@@ -110,8 +110,9 @@ public class LeadsController : ControllerBase
         var dt = await _db.QueryAsync($@"
             SELECT l.LM_KEY, l.LM_NAME, l.LM_CONTACT_NO, l.LM_EMAIL_ID, l.LM_ADDRESS, l.LM_REMARKS,
                    l.LM_CALLER_REMARKS, l.LM_PRODUCT, p.PRO_NAME AS PRODUCT_NAME,
-                   l.LM_ASSIGNED_TO, am.EMP_NAME AS ASSIGNED_TO_NAME, l.LM_STATUS,
-                   l.LM_CREATED_BY, l.LM_CREATED_ON, l.LM_ASSIGNED_ON
+                   l.LM_ASSIGNED_TO,
+                   CASE WHEN " + EmployeeFilters.Active("am") + " AND " + EmployeeFilters.NotDeleted("am") + " AND " + EmployeeFilters.NotConnector("am") + @" THEN am.EMP_NAME END AS ASSIGNED_TO_NAME,
+                   l.LM_STATUS, l.LM_CREATED_BY, l.LM_CREATED_ON, l.LM_ASSIGNED_ON
             FROM dbo.TBL_CIP_LEAD_MASTER l
             LEFT JOIN dbo.TBL_CIP_EMPLOYEE_MASTER am ON am.EMP_CODE = l.LM_ASSIGNED_TO
             LEFT JOIN dbo.TBL_CIP_PRODUCTS p ON p.PRO_KEY = l.LM_PRODUCT
@@ -157,7 +158,7 @@ public class LeadsController : ControllerBase
     }
 
     /// <summary>Team members available for assignment (viewer's subtree; admins: everyone).
-    /// Connectors (role 2010 / designation 1014) are excluded.</summary>
+    /// Connectors are excluded, and only employees still on roll are assignable.</summary>
     [HttpGet("assignees")]
     public async Task<ActionResult<object>> Assignees([FromQuery] string? search = null)
     {
@@ -165,8 +166,9 @@ public class LeadsController : ControllerBase
         var scopeSql = scope.IsAdmin ? "" :
             $" WHERE e.EMP_CODE IN ({HierarchyService.InlineCodes(scope.SubtreeCodes)})";
         var where = (scopeSql == "" ? " WHERE" : scopeSql + " AND") +
-                    " ISNULL(e.ACTIVE,0) = 1" +
-                    " AND ISNULL(e.ROLE_ID,0) <> 2010 AND ISNULL(e.DESIG_ID,0) <> 1014";
+                    " " + EmployeeFilters.Active("e") +
+                    " AND " + EmployeeFilters.NotDeleted("e") +
+                    " AND " + EmployeeFilters.NotConnector("e");
         var sql = $@"
             SELECT TOP 50 e.EMP_CODE, e.EMP_NAME, dn.DESIG_NAME
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
@@ -197,7 +199,7 @@ public class LeadsController : ControllerBase
         if (!ok) return BadRequest(new { error });
 
         if (req.AssignedTo is > 0 && !await _hierarchy.IsInScopeAsync(EmpCode, RoleId, req.AssignedTo.Value))
-            return StatusCode(403, new { error = "Assignee is outside your team's scope." });
+            return StatusCode(403, new { error = "Assignee must be an active, non-connector employee in your team's scope." });
 
         var dt = await _db.QueryAsync($@"
             INSERT INTO dbo.TBL_CIP_LEAD_MASTER
@@ -229,7 +231,7 @@ public class LeadsController : ControllerBase
         if (Convert.ToInt32(existing) == 0) return NotFound(new { error = "Lead not found." });
 
         if (req.AssignedTo is > 0 && !await _hierarchy.IsInScopeAsync(EmpCode, RoleId, req.AssignedTo.Value))
-            return StatusCode(403, new { error = "Assignee is outside your team's scope." });
+            return StatusCode(403, new { error = "Assignee must be an active, non-connector employee in your team's scope." });
 
         var affected = await _db.ExecuteAsync($@"
             UPDATE dbo.TBL_CIP_LEAD_MASTER SET

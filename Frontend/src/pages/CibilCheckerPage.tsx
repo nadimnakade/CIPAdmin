@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { api, fetchReportPdf, ApiError, getUser } from '../api';
 import Icon from '../components/Icon';
 import { confirmAction } from '../lib/confirm';
@@ -46,6 +46,37 @@ interface GenerateResponse {
   quota?: QuotaInfo | null;
 }
 
+/// Latest pull attempt for a PAN, from POST /api/cibil/check and the 409
+/// DUPLICATE_PULL body. A previous attempt this month — success OR failure —
+/// freezes the PAN; only an admin may re-pull. errorMessage is sent to admins only.
+interface PullAttemptInfo {
+  logId: number;
+  panNo: string;
+  reportType: string;
+  status: 'OK' | 'FAILED' | 'PENDING' | string;
+  source: string;
+  requestedBy: string | null;
+  pulledDate: string;
+  errorMessage: string | null;
+}
+
+interface CheckResponse {
+  /** A report for this PAN exists this month (pulled by ANY user) — Generate will
+      serve it from cache. Informational: it does NOT mean the caller pulled it. */
+  exists: boolean;
+  report: CibilReportInfo | null;
+  lastAttempt: PullAttemptInfo | null;
+  /** A previous attempt by THIS USER this month (any status) blocks a fresh pull.
+      Scoped server-side per user — a colleague's failed attempt never blocks us. */
+  blocked: boolean;
+  /** The signed-in user already pulled this PAN this month (directly or from cache).
+      Only then is the "already generated — download?" popup shown: another user's
+      pull must not interrupt a first-time puller with a popup meant for its owner. */
+  pulledByMe: boolean;
+  canRePull: boolean;
+  message: string | null;
+}
+
 /// One pull event made by the signed-in user — backs the "My Reports" section.
 /// Cached and legacy serves appear here too, because they count as pulls.
 interface MyPullRow {
@@ -61,6 +92,9 @@ interface MyPullRow {
   pullDate: string;
   pullTime: string;
 }
+
+/** Canonical PAN shape — 5 letters, 4 digits, 1 letter. Input is uppercased first. */
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
 const thisMonthKey = () => {
   const d = new Date();
@@ -92,7 +126,34 @@ export default function CibilCheckerPage() {
   const [reqReason, setReqReason] = useState('');
   const [reqError, setReqError] = useState('');
   const [reqSaving, setReqSaving] = useState(false);
+  /* `disabled={reqSaving}` alone does NOT prevent a double submit. setState is not
+     applied synchronously, so a second click landing in the same frame still reads
+     reqSaving === false and fires a second POST. A ref flips immediately, which is
+     what actually closes the window. (submit() guards this the same way with
+     `if (loading) return` for Enter-to-submit.) */
+  const reqSavingRef = useRef(false);
   const [panOnFile, setPanOnFile] = useState(false);
+  /* Server-declared duplicate-pull freeze for the PAN currently in the form: a
+     previous attempt THIS month (success or failure) blocks fresh pulls, and only
+     an admin re-pull may proceed. Carries the server's message — which includes the
+     failure reason when the caller is an admin. */
+  const [blocked, setBlocked] = useState<{ message: string; attempt: PullAttemptInfo | null } | null>(null);
+  /* Inline PAN-format error, written when the PAN field loses focus. Validation lives
+     on blur rather than on the Pull button, so a bad PAN is reported the moment the
+     user finishes typing instead of after a click that never reaches the server. */
+  const [panError, setPanError] = useState<string | null>(null);
+  /* Persistent Pull lock. Latched the instant a pull is initiated and deliberately NOT
+     cleared when the API answers — success and failure both leave the button disabled,
+     so the same PAN can never be fired twice by accident. Only Refresh releases it. */
+  const [pullInitiated, setPullInitiated] = useState(false);
+  /* React state is not applied synchronously, so `disabled={pullInitiated}` alone would
+     still let a second click in the same frame slip through. The ref flips before any
+     await, which is what actually closes the window (same reasoning as reqSavingRef). */
+  const pullInitiatedRef = useRef(false);
+  /* Last completed /api/cibil/check, keyed by PAN + reportType. The blur handler reuses
+     it rather than posting twice when the change-effect just ran for the same value. It
+     is dropped the moment a pull starts, because a pull is exactly what makes it stale. */
+  const checkCacheRef = useRef<{ key: string; data: CheckResponse } | null>(null);
 
   const pendingRequest = myRequests.find((r) => r.status === 'Pending' && r.requestMonth === thisMonthKey());
 
@@ -135,6 +196,42 @@ export default function CibilCheckerPage() {
     };
   }, [pdfUrl]);
 
+  /** Read — or reuse the just-read — server state for a PAN: does a report exist, and
+      is the PAN frozen this month? Shared by the change-effect and the blur handler. */
+  const runCheck = async (pan: string, reportType: string): Promise<CheckResponse> => {
+    const key = `${pan}|${reportType}`;
+    const hit = checkCacheRef.current;
+    if (hit && hit.key === key) return hit.data;
+    const data = await api.post<CheckResponse>('/api/cibil/check', { pan, reportType });
+    checkCacheRef.current = { key, data };
+    return data;
+  };
+
+  const applyCheck = (d: CheckResponse) => {
+    setBlocked(d.blocked
+      ? { message: d.message || 'This PAN has already been attempted this month.', attempt: d.lastAttempt }
+      : null);
+    setPanOnFile(d.exists);
+  };
+
+  // Freeze pre-check: tell the user the PAN is already attempted/frozen BEFORE they
+  // click Generate (a failed attempt leaves no report, so the old code only ever
+  // discovered this after burning another vendor credit). Also keeps panOnFile in
+  // step so the admin re-pull button appears as soon as the PAN is on file.
+  useEffect(() => {
+    const pan = form.panCard.trim().toUpperCase();
+    if (!PAN_RE.test(pan)) {
+      setBlocked(null);
+      setPanOnFile(false);
+      return;
+    }
+    let cancelled = false;
+    runCheck(pan, form.reportType)
+      .then((d) => { if (!cancelled) applyCheck(d); })
+      .catch(() => { /* pre-check is advisory — Generate re-validates server-side */ });
+    return () => { cancelled = true; };
+  }, [form.panCard, form.reportType]);
+
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   const showPdf = async (reportId: number, fileName: string, autoDownload: boolean) => {
@@ -153,9 +250,67 @@ export default function CibilCheckerPage() {
     }
   };
 
+  // PAN validation runs HERE — when the user finishes typing — not on the Pull button.
+  // Bad format stops at an inline error and goes no further; a PAN this USER already
+  // pulled this month offers the cached file instead of pulling again; a clean PAN —
+  // including one a colleague pulled — simply leaves the normal pull flow ready for
+  // the Generate button (the server serves it from cache and counts one pull).
+  const handlePanBlur = async () => {
+    const pan = form.panCard.trim().toUpperCase();
+    if (!pan) {
+      setPanError('PAN is mandatory.');
+      return;
+    }
+    if (!PAN_RE.test(pan)) {
+      setPanError('Enter a valid PAN (e.g. AHAPN0789J)');
+      return;
+    }
+    setPanError(null);
+    try {
+      const d = await runCheck(pan, form.reportType);
+      applyCheck(d);
+      // Popup is per user (pulledByMe): only the caller's own pull this month offers
+      // the file back. A report someone else pulled is still served from cache by
+      // Generate — it just doesn't show a dialog meant for the other user, and the
+      // pull is counted for THIS user when they press Generate.
+      if (d.exists && d.report && d.pulledByMe) {
+        const ok = await confirmAction({
+          title: 'CIBIL report already exists',
+          text: 'CIBIL for this PAN is already generated. Do you want to download the file?',
+          confirmText: 'Download',
+          cancelText: 'Cancel',
+        });
+        // Cancel changes nothing: no pull, no state move.
+        if (ok) await showPdf(d.report.reportId, d.report.fileName, true);
+      }
+    } catch {
+      /* pre-check is advisory — the server re-validates when a pull actually runs */
+    }
+  };
+
+  // The only release valve for the persistent Pull lock. Everything the lock touched
+  // goes back to neutral, and the server is re-read so the freeze banner / admin
+  // re-pull button reflect what is true NOW rather than what was true before the pull.
+  const refreshForm = () => {
+    pullInitiatedRef.current = false;
+    setPullInitiated(false);
+    checkCacheRef.current = null;
+    setPanError(null);
+    setMessage(null);
+    const pan = form.panCard.trim().toUpperCase();
+    if (!PAN_RE.test(pan)) {
+      setBlocked(null);
+      setPanOnFile(false);
+    } else {
+      runCheck(pan, form.reportType).then(applyCheck).catch(() => { /* advisory */ });
+    }
+    refreshQuota();
+  };
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (loading) return; // Enter-key resubmit guard (disabled button alone doesn't block this)
+    if (pullInitiatedRef.current) return; // persistent lock — only Refresh releases it
     // A disabled <fieldset> stops clicks and typing but NOT Enter-to-submit in every
     // browser, so the out-of-quota case is re-checked here as well.
     if (quotaBlocked) {
@@ -163,17 +318,21 @@ export default function CibilCheckerPage() {
       setShowRequestPanel(true);
       return;
     }
+
+    // Latch the lock BEFORE the request leaves: the button stays disabled through the
+    // response — success or failure — and only the Refresh button clears it.
+    pullInitiatedRef.current = true;
+    setPullInitiated(true);
+    checkCacheRef.current = null; // a pull invalidates the cached pre-check
+
     setMessage(null);
     setShowRequestPanel(false);
 
-    // Validate BEFORE entering the loading state so errors appear instantly.
+    // PAN format is decided on blur (inline, via handlePanBlur). This is only the
+    // backstop for a path that skipped blur, and it reports the same inline error.
     const pan = form.panCard.trim().toUpperCase();
-    if (!pan) {
-      setMessage({ kind: 'err', text: 'PAN is mandatory.' });
-      return;
-    }
-    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) {
-      setMessage({ kind: 'err', text: 'Enter a valid PAN (e.g. AHAPN0789J).' });
+    if (!PAN_RE.test(pan)) {
+      setPanError(!pan ? 'PAN is mandatory.' : 'Enter a valid PAN (e.g. AHAPN0789J)');
       return;
     }
 
@@ -190,6 +349,7 @@ export default function CibilCheckerPage() {
 
       await showPdf(res.report.reportId, res.report.fileName, false);
       setPanOnFile(res.source === 'CACHE' || res.source === 'LEGACY');
+      setBlocked(null);
       if (res.quota) setQuota(res.quota);
       // The response quota already includes this pull (the server logs the event
       // before building it); re-read the ledger so "My Reports" picks up the new row.
@@ -203,7 +363,13 @@ export default function CibilCheckerPage() {
         setMessage({ kind: 'ok', text: `Report generated & saved as ${res.report.fileName}` });
       }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) {
+      if (err instanceof ApiError && err.body?.code === 'DUPLICATE_PULL') {
+        // Previous attempt this month (any status) — the PAN is frozen. The server's
+        // message already carries the admin-only failure reason when we may see it.
+        setBlocked({ message: err.message, attempt: err.body.lastAttempt ?? null });
+      } else if (err instanceof ApiError && err.body?.code === 'RE-PULL_ADMIN_ONLY') {
+        setMessage({ kind: 'err', text: err.message });
+      } else if (err instanceof ApiError && err.status === 403) {
         // Quota exceeded — surface quota info, the existing PAN PDF (if any) and the request panel.
         if (err.body?.quota) setQuota(err.body.quota);
         if (err.body?.existingReport) {
@@ -222,6 +388,8 @@ export default function CibilCheckerPage() {
 
   const submitLimitRequest = async (e: FormEvent) => {
     e.preventDefault();
+    if (reqSavingRef.current) return; // re-entry guard: see reqSavingRef
+    reqSavingRef.current = true;
     setReqSaving(true);
     setReqError('');
     try {
@@ -237,6 +405,7 @@ export default function CibilCheckerPage() {
     } catch (err) {
       setReqError(err instanceof ApiError ? err.message : 'Failed to submit request');
     } finally {
+      reqSavingRef.current = false;
       setReqSaving(false);
     }
   };
@@ -245,11 +414,19 @@ export default function CibilCheckerPage() {
     const pan = form.panCard.trim().toUpperCase();
     const ok = await confirmAction({
       title: `Regenerate the report for ${pan}?`,
-      text: 'The existing PDF for this month is REPLACED with a fresh pull.\nThis uses one vendor credit.',
+      text: panOnFile
+        ? 'The existing PDF for this month is REPLACED with a fresh pull.\nThis uses one vendor credit.'
+        : 'No report exists for this PAN this month — the previous attempt did not produce one.\nThis starts a fresh pull and uses one vendor credit.',
       confirmText: 'Regenerate',
       tone: 'danger',
     });
     if (!ok) return;
+    if (pullInitiatedRef.current) return; // persistent lock — only Refresh releases it
+    // A re-pull IS a pull: it takes the same lock, so the buttons stay shut afterwards
+    // and the refresh hint appears for this path too.
+    pullInitiatedRef.current = true;
+    setPullInitiated(true);
+    checkCacheRef.current = null;
     setMessage(null);
     setLoading(true);
     try {
@@ -265,10 +442,16 @@ export default function CibilCheckerPage() {
       await showPdf(res.report.reportId, res.report.fileName, false);
       if (res.quota) setQuota(res.quota);
       setPanOnFile(true);
+      setBlocked(null);
       refreshQuota();
       setMessage({ kind: 'ok', text: res.message });
     } catch (err) {
-      setMessage({ kind: 'err', text: err instanceof ApiError ? err.message : 'Regeneration failed' });
+      if (err instanceof ApiError && err.body?.code === 'DUPLICATE_PULL') {
+        // e.g. another re-pull for this PAN is already in flight.
+        setBlocked({ message: err.message, attempt: err.body.lastAttempt ?? null });
+      } else {
+        setMessage({ kind: 'err', text: err instanceof ApiError ? err.message : 'Regeneration failed' });
+      }
     } finally {
       setLoading(false);
     }
@@ -294,6 +477,11 @@ export default function CibilCheckerPage() {
   // says the allowance is spent, so the form greys out instead of letting them
   // fill it in and then bounce off a 403.
   const quotaBlocked = !!quota && !isAdmin && (quota.blocked || quota.remaining <= 0);
+
+  // Duplicate-pull freeze: a previous attempt for this PAN this month — success or
+  // failure — means only an admin re-pull may proceed, so the plain Generate button
+  // locks for everyone else instead of letting them burn another vendor credit.
+  const freezeBlocked = !!blocked && !isAdmin;
 
   return (
     <div className="page page-narrow">
@@ -358,11 +546,17 @@ export default function CibilCheckerPage() {
             <input
               placeholder="Enter PAN number"
               value={form.panCard}
-              onChange={(e) => set('panCard', e.target.value.toUpperCase().slice(0, 10))}
+              onChange={(e) => {
+                setPanError(null); // stale error drops while typing; blur re-validates
+                set('panCard', e.target.value.toUpperCase().slice(0, 10));
+              }}
+              onBlur={handlePanBlur}
               pattern="[A-Za-z]{5}[0-9]{4}[A-Za-z]"
               title="10-character PAN, e.g. AHAPN0789J"
+              aria-invalid={!!panError}
               required
             />
+            {panError && <span className="field-error" role="alert">{panError}</span>}
           </label>
         </div>
 
@@ -395,16 +589,39 @@ export default function CibilCheckerPage() {
 
         {message && <div className={`alert ${message.kind}`}>{message.text}</div>}
 
-        <button className="btn primary full" disabled={loading || quotaBlocked}>
+        {blocked && (
+          <div className="alert warn">
+            <b>Duplicate pull blocked.</b> {blocked.message}
+          </div>
+        )}
+
+        <button className="btn primary full" disabled={loading || quotaBlocked || freezeBlocked || pullInitiated}>
           {loading
             ? (<><span className="spinner" aria-hidden /> Generating report — please wait…</>)
-            : quotaBlocked ? 'Limit reached — request an increase below' : 'Generate Report'}
+            : quotaBlocked ? 'Limit reached — request an increase below'
+            : pullInitiated ? 'Pull initiated — click Refresh to enable'
+            : freezeBlocked ? 'PAN frozen this month — admin re-pull required'
+            : 'Generate Report'}
         </button>
         </fieldset>
 
-        {isAdmin && panOnFile && (
-          <button type="button" className="btn warn full" onClick={regenerate} disabled={loading}>
-            <Icon name="edit" size={16} /> Regenerate (Admin) — replaces the saved PDF
+        {/* Deliberately OUTSIDE the fieldset: a disabled <fieldset> would disable the
+            Refresh button too, and the lock would have no way out. */}
+        {pullInitiated && (
+          <div className="alert warn pull-refresh" role="status">
+            <span>Click on Refresh to enable the button.</span>
+            <button type="button" className="btn secondary small" onClick={refreshForm}>
+              <Icon name="refresh" size={14} /> Refresh
+            </button>
+          </div>
+        )}
+
+        {isAdmin && (panOnFile || blocked) && (
+          <button type="button" className="btn warn full" onClick={regenerate} disabled={loading || pullInitiated}>
+            <Icon name="edit" size={16} />{' '}
+            {panOnFile
+              ? 'Regenerate (Admin) — replaces the saved PDF'
+              : 'Re-pull (Admin) — retry this month\u2019s failed pull'}
           </button>
         )}
       </form>
@@ -443,7 +660,10 @@ export default function CibilCheckerPage() {
                 </label>
               </div>
               {reqError && <div className="alert error">{reqError}</div>}
-              <button className="btn primary" disabled={reqSaving || !reqLimit}>
+              {/* type="submit" is what lets Enter in the reason field reach this;
+                  disabling the button stops the click, and reqSavingRef stops the
+                  second POST. */}
+              <button type="submit" className="btn primary" disabled={reqSaving || !reqLimit}>
                 {reqSaving ? 'Submitting…' : 'Submit Request to Administrator'}
               </button>
             </form>

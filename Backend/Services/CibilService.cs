@@ -11,6 +11,12 @@ public interface ICibilService
 {
     Task<CibilReportInfo?> FindByPanAsync(string pan, string reportType = "cibil", bool currentMonthOnly = false);
     Task<CibilReportInfo?> FindLegacyByPanAsync(string pan, string reportType = "cibil");
+    /// <summary>Latest pull ATTEMPT for a PAN+type in the current calendar month,
+    /// whatever its outcome (OK / FAILED / in-flight PENDING). This is what the
+    /// duplicate-pull freeze is decided on — see Backend/sql/CIBIL-DEDUPE-FAILED.sql.
+    /// Pass empCode to see only that user's attempts (per-user popup/freeze state);
+    /// a PENDING pull in flight by ANYONE still counts either way.</summary>
+    Task<PullAttemptInfo?> FindLastAttemptAsync(string pan, string reportType = "cibil", int? empCode = null);
     Task<CibilGenerateResponse> GenerateAsync(CibilRequest request, int pulledBy, string pulledByName, bool isAdmin, bool regenerate, CancellationToken ct = default);
     Task<List<object>> QueryEmployeeLimitsAsync(string? search, string filter);
     Task<object> SetEmployeeLimitAsync(int empCode, int monthlyLimit, int setBy);
@@ -54,6 +60,25 @@ public class RegenerateBlockedException : Exception
 {
     public CibilReportInfo Report { get; }
     public RegenerateBlockedException(string message, CibilReportInfo report) : base(message) { Report = report; }
+}
+
+/// <summary>HTTP 409: the PAN already has a pull attempt this month — whatever its
+/// outcome — and no fresh pull may be made without an admin re-pull. A failed vendor
+/// call leaves no report row, so without this freeze every retry hit the vendor and
+/// burned a credit. Carries the blocking attempt so the client can show when/by whom
+/// the attempt was made, and (admins only) why it failed.</summary>
+public class DuplicatePullBlockedException : Exception
+{
+    public PullAttemptInfo Attempt { get; }
+    public DuplicatePullBlockedException(string message, PullAttemptInfo attempt) : base(message)
+    { Attempt = attempt; }
+}
+
+/// <summary>HTTP 403: a re-pull (regenerate=true) was requested by a non-admin.
+/// Re-pulls are admin-only irrespective of the previous pull's status.</summary>
+public class RePullForbiddenException : Exception
+{
+    public RePullForbiddenException(string message) : base(message) { }
 }
 
 public class CibilService : ICibilService
@@ -173,6 +198,63 @@ public class CibilService : ICibilService
         return dt.Rows.Count == 0 ? null : MapRow(dt.Rows[0]);
     }
 
+    /// <summary>The most recent pull attempt for a PAN+type in the current calendar
+    /// month, whatever its outcome. The old freeze only looked at report rows, which
+    /// exist solely after a SUCCESSFUL pull — failed attempts were written to the
+    /// ledger (STATUS='FAILED') but never read back, so each retry cost a vendor credit.
+    /// Month-scoped: the freeze lasts until the calendar month rolls over.
+    ///
+    /// User-scoped: pass empCode and only THAT user's attempts come back, so one
+    /// user's history never freezes a PAN for a colleague. The single exception is an
+    /// in-flight PENDING pull by anyone — vendor credits are shared (and
+    /// UX_CIP_PULL_INFLIGHT only ever holds one slot per PAN), so a pull running right
+    /// now still counts globally.</summary>
+    public async Task<PullAttemptInfo?> FindLastAttemptAsync(string pan, string reportType = "cibil", int? empCode = null)
+    {
+        pan = (pan ?? "").Trim().ToUpperInvariant();
+        if (pan.Length == 0) return null;
+
+        var dt = await FindAttemptRowAsync(pan, reportType, empCode);
+        if (dt.Rows.Count == 0 && empCode.HasValue)
+            dt = await FindAttemptRowAsync(pan, reportType, null, pendingOnly: true);
+        if (dt.Rows.Count == 0) return null;
+        var r = dt.Rows[0];
+        return new PullAttemptInfo
+        {
+            LogId = Convert.ToInt32(r["LOG_ID"]),
+            PanNo = r["PAN_NO"].ToString() ?? "",
+            ReportType = r["REPORT_TYPE"].ToString() ?? "cibil",
+            Status = r["STATUS"].ToString() ?? "",
+            Source = r["SOURCE"].ToString() ?? "",
+            RequestedBy = r["EMP_NAME"] == DBNull.Value ? null : r["EMP_NAME"].ToString(),
+            PulledDate = Convert.ToDateTime(r["PULLED_DATE"]),
+            ErrorMessage = r["ERROR_MESSAGE"] == DBNull.Value ? null : r["ERROR_MESSAGE"].ToString(),
+        };
+    }
+
+    /// <summary>Latest attempt row this month for a PAN+type, optionally restricted to
+    /// one user's rows (empCode) or to in-flight PENDING rows (pendingOnly, used as the
+    /// global fallback when the user has no attempt of their own).</summary>
+    private async Task<DataTable> FindAttemptRowAsync(string pan, string reportType, int? empCode, bool pendingOnly = false)
+    {
+        var where = "PAN_NO = @pan AND REPORT_TYPE = @type AND PULL_MONTH = @m";
+        if (empCode.HasValue) where += " AND EMP_CODE = @e";
+        if (pendingOnly) where += " AND STATUS = 'PENDING'";
+
+        return await _db.QueryAsync($@"
+            SELECT TOP 1 LOG_ID, PAN_NO, REPORT_TYPE, STATUS, SOURCE, EMP_NAME, PULLED_DATE, ERROR_MESSAGE
+            FROM dbo.TBL_CIP_CIBIL_PULL_LOG
+            WHERE {where}
+            ORDER BY PULLED_DATE DESC, LOG_ID DESC",
+            p =>
+            {
+                p.AddWithValue("@pan", pan);
+                p.AddWithValue("@type", reportType ?? "cibil");
+                p.AddWithValue("@m", CurrentMonthKey());
+                if (empCode.HasValue) p.AddWithValue("@e", empCode.Value);
+            });
+    }
+
     private static CibilReportInfo MapRow(DataRow r) => new()
     {
         ReportId = Convert.ToInt32(r["REPORT_ID"]),
@@ -213,10 +295,6 @@ public class CibilService : ICibilService
 
     // ------------------------------------------------- employee limits (admin)
 
-    /// <summary>Connector role / designation — excluded from employee listings.</summary>
-    private const int ConnectorRoleId = 2010;
-    private const int ConnectorDesigId = 1014;
-
     /// <summary>Employees with their per-employee monthly pull limits (admins only).
     /// Returns employees matching the search; NULL limit = on the default.
     /// Connector-role/designation employees are hidden.</summary>
@@ -228,14 +306,13 @@ public class CibilService : ICibilService
                    l.MONTHLY_LIMIT, l.SET_ON
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_EMPLOYEE_CIBIL_LIMIT l ON l.EMP_CODE = e.EMP_CODE
-            WHERE ISNULL(e.ROLE_ID, 0) <> @connectorRole
-              AND ISNULL(e.DESIG_ID, 0) <> @connectorDesig
+            WHERE {EmployeeFilters.Active("e")}
+              AND {EmployeeFilters.NotDeleted("e")}
+              AND {EmployeeFilters.NotConnector("e")}
             {filter}
             ORDER BY CASE WHEN l.EMP_CODE IS NULL THEN 1 ELSE 0 END, e.EMP_NAME",
             p =>
             {
-                p.AddWithValue("@connectorRole", ConnectorRoleId);
-                p.AddWithValue("@connectorDesig", ConnectorDesigId);
                 if (!string.IsNullOrWhiteSpace(search)) p.AddWithValue("@q", "%" + search.Trim() + "%");
             });
 
@@ -256,11 +333,12 @@ public class CibilService : ICibilService
 
     public async Task<object> SetEmployeeLimitAsync(int empCode, int monthlyLimit, int setBy)
     {
-        var exists = await _db.ScalarAsync(
-            "SELECT COUNT(1) FROM dbo.TBL_CIP_EMPLOYEE_MASTER WHERE EMP_CODE = @e",
+        var eligible = await _db.ScalarAsync(
+            "SELECT CASE WHEN " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e")
+                + " AND " + EmployeeFilters.NotConnector("e") + " THEN 1 ELSE 0 END FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @e",
             p => p.AddWithValue("@e", empCode));
-        if (Convert.ToInt32(exists) == 0)
-            throw new InvalidOperationException("Employee not found.");
+        if (eligible == null || eligible == DBNull.Value || Convert.ToInt32(eligible) != 1)
+            throw new InvalidOperationException("Active non-connector employee not found.");
 
         await _db.ExecuteAsync(@"
             MERGE dbo.TBL_CIP_EMPLOYEE_CIBIL_LIMIT AS t
@@ -275,6 +353,13 @@ public class CibilService : ICibilService
 
     public async Task ClearEmployeeLimitAsync(int empCode)
     {
+        var eligible = await _db.ScalarAsync(
+            "SELECT CASE WHEN " + EmployeeFilters.Active("e") + " AND " + EmployeeFilters.NotDeleted("e")
+                + " AND " + EmployeeFilters.NotConnector("e") + " THEN 1 ELSE 0 END FROM dbo.TBL_CIP_EMPLOYEE_MASTER e WHERE e.EMP_CODE = @e",
+            p => p.AddWithValue("@e", empCode));
+        if (eligible == null || eligible == DBNull.Value || Convert.ToInt32(eligible) != 1)
+            throw new InvalidOperationException("Active non-connector employee not found.");
+
         await _db.ExecuteAsync(
             "DELETE FROM dbo.TBL_CIP_EMPLOYEE_CIBIL_LIMIT WHERE EMP_CODE = @e",
             p => p.AddWithValue("@e", empCode));
@@ -565,7 +650,8 @@ public class CibilService : ICibilService
             SELECT e.LOCATION_ID, l.LOC_NAME
             FROM dbo.TBL_CIP_EMPLOYEE_MASTER e
             LEFT JOIN dbo.TBL_CIP_LOCATION_MASTER l ON l.LOC_ID = e.LOCATION_ID
-            WHERE e.EMP_CODE = @e",
+            WHERE e.EMP_CODE = @e AND " + EmployeeFilters.Active("e")
+                + " AND " + EmployeeFilters.NotDeleted("e") + " AND " + EmployeeFilters.NotConnector("e"),
             p => p.AddWithValue("@e", empCode));
 
         if (dt.Rows.Count == 0) return (null, null);
@@ -618,23 +704,191 @@ public class CibilService : ICibilService
 
             // Keep the report row's snapshot columns in step with the ledger.
             if (reportId.HasValue)
-                await _db.ExecuteAsync(@"
-                    UPDATE dbo.TBL_CIP_CIBIL_REPORTS
-                    SET LOCATION_ID = @locId, LOCATION_NAME = @locName,
-                        CENTER_MANAGER = ISNULL(CENTER_MANAGER, @empname)
-                    WHERE REPORT_ID = @id",
-                    p =>
-                    {
-                        p.AddWithValue("@locId", (object?)locId ?? DBNull.Value);
-                        p.AddWithValue("@locName", (object?)locName ?? DBNull.Value);
-                        p.AddWithValue("@empname", (object?)empName ?? DBNull.Value);
-                        p.AddWithValue("@id", reportId.Value);
-                    });
+                await UpdateReportSnapshotAsync(reportId.Value, locId, locName, empName);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to record CIBIL pull event for PAN {Pan} (emp {Emp})", pan, empCode);
         }
+    }
+
+    /// <summary>Snapshots the requester's location onto the report row so the grid keeps
+    /// showing where a report came from after the employee is transferred. Throws —
+    /// callers are the ledger writers, which wrap everything in their own
+    /// best-effort catch so bookkeeping can never fail a pull.</summary>
+    private async Task UpdateReportSnapshotAsync(int reportId, int? locId, string? locName, string? empName)
+    {
+        await _db.ExecuteAsync(@"
+            UPDATE dbo.TBL_CIP_CIBIL_REPORTS
+            SET LOCATION_ID = @locId, LOCATION_NAME = @locName,
+                CENTER_MANAGER = ISNULL(CENTER_MANAGER, @empname)
+            WHERE REPORT_ID = @id",
+            p =>
+            {
+                p.AddWithValue("@locId", (object?)locId ?? DBNull.Value);
+                p.AddWithValue("@locName", (object?)locName ?? DBNull.Value);
+                p.AddWithValue("@empname", (object?)empName ?? DBNull.Value);
+                p.AddWithValue("@id", reportId);
+            });
+    }
+
+    /// <summary>Opens the pull ledger row BEFORE the vendor is called, with
+    /// STATUS='PENDING'. The unique filtered index UX_CIP_PULL_INFLIGHT turns this
+    /// into a database-level guarantee that only one vendor call per PAN can be in
+    /// flight, so two concurrent Generate clicks cannot both spend a credit.
+    ///
+    /// Returns the LOG_ID for FinalizePullAsync, or null when the ledger could not be
+    /// written — best-effort by design, like every other ledger write here: a pull is
+    /// never failed over bookkeeping. The one exception is losing the in-flight race
+    /// (SQL 2601/2627), which is a real duplicate and is reported as such.</summary>
+    private async Task<int?> BeginPullAsync(string pan, string reportType, int empCode, string empName, string source)
+    {
+        try
+        {
+            // Retire a PENDING row a crashed/restarted process left behind: it holds
+            // the in-flight slot and would otherwise freeze the PAN for good. The
+            // reason text is best-effort on its own so a database still missing
+            // ERROR_MESSAGE (migration not yet run) degrades instead of failing.
+            try
+            {
+                await _db.ExecuteAsync(@"
+                    UPDATE dbo.TBL_CIP_CIBIL_PULL_LOG
+                       SET ERROR_MESSAGE = COALESCE(ERROR_MESSAGE, 'Pull attempt interrupted (server restart or timeout).')
+                     WHERE PAN_NO = @pan AND REPORT_TYPE = @type AND STATUS = 'PENDING'
+                       AND PULLED_DATE < DATEADD(MINUTE, -15, GETDATE())",
+                    p => { p.AddWithValue("@pan", pan); p.AddWithValue("@type", reportType); });
+            }
+            catch (SqlException ex)
+            {
+                _logger.LogWarning(ex, "Could not record interruption reason for stale PENDING CIBIL pull on PAN {Pan}", pan);
+            }
+            await _db.ExecuteAsync(@"
+                UPDATE dbo.TBL_CIP_CIBIL_PULL_LOG
+                   SET STATUS = 'FAILED'
+                 WHERE PAN_NO = @pan AND REPORT_TYPE = @type AND STATUS = 'PENDING'
+                   AND PULLED_DATE < DATEADD(MINUTE, -15, GETDATE())",
+                p => { p.AddWithValue("@pan", pan); p.AddWithValue("@type", reportType); });
+
+            var (locId, locName) = await EmployeeLocationAsync(empCode);
+            var newId = await _db.ScalarAsync(@"
+                INSERT INTO dbo.TBL_CIP_CIBIL_PULL_LOG
+                    (REPORT_ID, PAN_NO, REPORT_TYPE, EMP_CODE, EMP_NAME,
+                     LOCATION_ID, LOCATION_NAME, PULLED_BY_NAME, SOURCE, STATUS, PULLED_DATE)
+                OUTPUT INSERTED.LOG_ID
+                VALUES
+                    (NULL, @pan, @type, @emp, @empname,
+                     @locId, @locName, @empname, @source, 'PENDING', GETDATE())",
+                p =>
+                {
+                    p.AddWithValue("@pan", pan);
+                    p.AddWithValue("@type", reportType);
+                    p.AddWithValue("@emp", empCode);
+                    p.AddWithValue("@empname", (object?)empName ?? DBNull.Value);
+                    p.AddWithValue("@locId", (object?)locId ?? DBNull.Value);
+                    p.AddWithValue("@locName", (object?)locName ?? DBNull.Value);
+                    p.AddWithValue("@source", source);
+                });
+            return Convert.ToInt32(newId);
+        }
+        catch (SqlException ex) when (ex.Number is 2601 or 2627)
+        {
+            // A concurrent request already owns the in-flight slot for this PAN.
+            var attempt = await FindLastAttemptAsync(pan, reportType);
+            throw new DuplicatePullBlockedException(
+                $"A CIBIL pull for PAN {pan} is already in progress. Wait for it to finish before trying again.",
+                attempt ?? new PullAttemptInfo
+                {
+                    PanNo = pan, ReportType = reportType, Status = "PENDING",
+                    Source = source, RequestedBy = empName, PulledDate = DateTime.Now
+                });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to open CIBIL pull ledger row for PAN {Pan} (emp {Emp})", pan, empCode);
+            return null;
+        }
+    }
+
+    /// <summary>Closes the row BeginPullAsync opened: OK + the report served (plus the
+    /// location snapshot), or FAILED + the vendor's error text, which is what freezes
+    /// the PAN for the rest of the month and what an admin sees as the failure reason.
+    /// STATUS='FAILED' stays excluded from quota counts, so a vendor error never burns
+    /// the user's allowance — only the vendor's own credit. Best-effort.</summary>
+    private async Task FinalizePullAsync(int? logId, int? reportId, int empCode, string empName, string status, string? error)
+    {
+        try
+        {
+            if (logId.HasValue)
+            {
+                await _db.ExecuteAsync(@"
+                    UPDATE dbo.TBL_CIP_CIBIL_PULL_LOG
+                       SET STATUS = @status, REPORT_ID = @reportId
+                     WHERE LOG_ID = @id",
+                    p =>
+                    {
+                        p.AddWithValue("@status", status);
+                        p.AddWithValue("@reportId", (object?)reportId ?? DBNull.Value);
+                        p.AddWithValue("@id", logId.Value);
+                    });
+
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    // Separate statement: a database that has not run
+                    // CIBIL-DEDUPE-FAILED.sql yet loses the reason text, not the status.
+                    try
+                    {
+                        await _db.ExecuteAsync(@"
+                            UPDATE dbo.TBL_CIP_CIBIL_PULL_LOG
+                               SET ERROR_MESSAGE = @err
+                             WHERE LOG_ID = @id",
+                            p =>
+                            {
+                                p.AddWithValue("@err", Truncate(error, 500));
+                                p.AddWithValue("@id", logId.Value);
+                            });
+                    }
+                    catch (SqlException ex)
+                    {
+                        _logger.LogWarning(ex, "Could not store CIBIL failure reason for log {LogId} (run CIBIL-DEDUPE-FAILED.sql)", logId.Value);
+                    }
+                }
+            }
+
+            if (reportId.HasValue)
+            {
+                var (locId, locName) = await EmployeeLocationAsync(empCode);
+                await UpdateReportSnapshotAsync(reportId.Value, locId, locName, empName);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to finalize CIBIL pull ledger row {LogId}", logId);
+        }
+    }
+
+    /// <summary>The user-facing block message for a duplicate pull. The vendor's error
+    /// text and the "use Re-pull" hint are appended only for admins — the failure
+    /// reason is admin-only. Public so the check endpoint reports the exact same
+    /// wording the generate endpoint would throw.</summary>
+    public static string DuplicateBlockMessage(PullAttemptInfo a, bool isAdmin)
+    {
+        var when = a.PulledDate.ToString("dd MMM yyyy 'at' HH:mm");
+        var by = string.IsNullOrWhiteSpace(a.RequestedBy) ? "another user" : a.RequestedBy;
+        var msg = a.Status switch
+        {
+            "PENDING" => $"A CIBIL pull for PAN {a.PanNo} is already in progress ({when}, requested by {by}). " +
+                         "Wait for it to finish — duplicate attempts consume vendor credits.",
+            "FAILED" => $"A CIBIL pull for PAN {a.PanNo} was already attempted on {when} by {by} and failed. " +
+                        "Duplicate attempts consume vendor credits, so this PAN is frozen for the rest of the month — " +
+                        "only an administrator can re-pull it.",
+            _ => $"A CIBIL report for PAN {a.PanNo} was already pulled on {when} by {by}. " +
+                 "This PAN is frozen for the rest of the month — only an administrator can re-pull it."
+        };
+        if (!isAdmin) return msg;
+        var admin = " Use the Re-pull action to try again.";
+        if (a.Status == "FAILED" && !string.IsNullOrWhiteSpace(a.ErrorMessage))
+            admin += $" Last error: {a.ErrorMessage}";
+        return msg + admin;
     }
 
     public async Task<CibilGenerateResponse> GenerateAsync(CibilRequest request, int pulledBy, string pulledByName, bool isAdmin, bool regenerate, CancellationToken ct = default)
@@ -646,6 +900,14 @@ public class CibilService : ICibilService
 
         if (pan.Length < 10 || !Regex.IsMatch(pan, "^[A-Z]{5}[0-9]{4}[A-Z]$"))
             throw new InvalidOperationException("A valid 10-character PAN (e.g. AHAPN0789J) is required.");
+
+        // ---------- RULE 0: a re-pull is an ADMIN-ONLY action, whatever the previous
+        // attempt's status. The controller already strips regenerate for non-admins;
+        // refusing loudly here means the service layer cannot be bypassed by a future
+        // endpoint either, and the user is told why instead of silently getting cache.
+        if (regenerate && !isAdmin)
+            throw new RePullForbiddenException(
+                "Only administrators can re-pull a CIBIL report for a PAN, irrespective of the previous pull's status.");
 
         // ---------- RULE 2b: LEGACY reports (standalone-era PDFs) serve from disk
         // forever, regardless of month. Only an admin Regenerate re-pulls these.
@@ -689,6 +951,26 @@ public class CibilService : ICibilService
             };
         }
 
+        // ---------- RULE 4: a PAN that YOU have ATTEMPTED this month is frozen for
+        // YOU, regardless of how the attempt ended (OK, FAILED or in-flight PENDING).
+        // The freeze is per user: a colleague's failed attempt no longer locks this
+        // caller out of the PAN. The report-row checks above only ever see successes —
+        // a failed vendor call leaves no report row, so a retry of the SAME user's
+        // failure used to reach the vendor and burn a credit. An in-flight PENDING pull
+        // by anyone still blocks (shared vendor credits / UX_CIP_PULL_INFLIGHT). Only
+        // an admin regenerate re-opens the PAN.
+        if (!(isAdmin && regenerate))
+        {
+            var attempt = await FindLastAttemptAsync(pan, reportType, pulledBy);
+            if (attempt != null)
+            {
+                _logger.LogInformation(
+                    "Duplicate CIBIL pull for PAN {Pan} blocked (last attempt {Status} on {At} by {By}, requester admin: {Admin}).",
+                    pan, attempt.Status, attempt.PulledDate, attempt.RequestedBy, isAdmin);
+                throw new DuplicatePullBlockedException(DuplicateBlockMessage(attempt, isAdmin), attempt);
+            }
+        }
+
         // ---------- RULE 1: monthly pull quota for regular users.
         // Admins pulling a regeneration bypass the quota (RULE 2) and quota is not consumed.
         var quota = await GetQuotaAsync(pulledBy, pulledByName);
@@ -709,7 +991,20 @@ public class CibilService : ICibilService
             _logger.LogInformation("Admin {User} regenerating CIBIL for PAN {Pan} (report {Id}).", pulledByName, pan, existingReport.ReportId);
             var oldPath = await GetFilePathAsync(existingReport.ReportId);
 
-            var regenBytes = await PullFromApiAsync(request, ResolveApiToken(request), ct);
+            // Open the ledger row first: STATUS='PENDING' holds the in-flight slot so a
+            // concurrent request cannot double-spend, and a failure below is recorded
+            // with the vendor's reason instead of vanishing unlogged.
+            var regenLogId = await BeginPullAsync(pan, reportType, pulledBy, pulledByName, "REGEN");
+            byte[] regenBytes;
+            try
+            {
+                regenBytes = await PullFromApiAsync(request, ResolveApiToken(request), ct);
+            }
+            catch (Exception ex)
+            {
+                await FinalizePullAsync(regenLogId, null, pulledBy, pulledByName, "FAILED", ex.Message);
+                throw;
+            }
             var regenFileName = BuildFileName(request.Name, pan);
             var regenPath = Path.Combine(UserStorageFolderPath(pulledByName), regenFileName);
             await System.IO.File.WriteAllBytesAsync(regenPath, regenBytes, ct);
@@ -735,7 +1030,7 @@ public class CibilService : ICibilService
             TryDeleteFile(oldPath);
 
             _logger.LogInformation("Admin regeneration for PAN {Pan} saved as {File} (row {Id} replaced).", pan, regenFileName, existingReport.ReportId);
-            await RecordPullAsync(existingReport.ReportId, pan, reportType, pulledBy, pulledByName, "REGEN");
+            await FinalizePullAsync(regenLogId, existingReport.ReportId, pulledBy, pulledByName, "OK", null);
             return new CibilGenerateResponse
             {
                 Source = "REGEN",
@@ -759,18 +1054,24 @@ public class CibilService : ICibilService
             };
         }
 
-        // ---------- Fresh pull (new PAN this month).
+        // ---------- Fresh pull (first attempt for this PAN this month).
+        // The ledger row opens BEFORE the vendor call: PENDING marks the in-flight
+        // slot (UX_CIP_PULL_INFLIGHT), then is finalized to OK or FAILED below.
+        var pullLogId = await BeginPullAsync(pan, reportType, pulledBy, pulledByName,
+            isAdmin && regenerate ? "REGEN" : "API");
         byte[] bytes;
         try
         {
             bytes = await PullFromApiAsync(request, ResolveApiToken(request), ct);
         }
-        catch
+        catch (Exception ex)
         {
-            // Log the attempt as FAILED so the audit trail shows a pull was tried.
-            // STATUS='FAILED' is excluded from quota counts, so a vendor error never
-            // burns a user's monthly allowance.
-            await RecordPullAsync(existingReport?.ReportId, pan, reportType, pulledBy, pulledByName, "API", "FAILED");
+            // Ledger the failure with the vendor's error text — this row is what
+            // freezes the PAN for the rest of the month and what an admin sees as the
+            // reason. STATUS='FAILED' is excluded from quota counts, so a vendor error
+            // never burns the user's allowance (only the vendor credit, which the
+            // freeze now stops from happening again).
+            await FinalizePullAsync(pullLogId, null, pulledBy, pulledByName, "FAILED", ex.Message);
             throw;
         }
 
@@ -781,9 +1082,22 @@ public class CibilService : ICibilService
 
         var (reportId, source) = await InsertReportAsync(request, pan, reportType, fileName, filePath, bytes.Length, pulledBy, pulledByName);
 
+        // An admin re-pull of a PAN whose only history this month is a FAILED attempt
+        // lands here — the REGEN branch above requires an existing report row, which a
+        // failed pull never created. Label the artefact REGEN too, so the Reports grid
+        // and the ledger agree on which pulls an administrator forced.
+        if (source == "API" && isAdmin && regenerate)
+        {
+            await _db.ExecuteAsync(
+                "UPDATE dbo.TBL_CIP_CIBIL_REPORTS SET SOURCE = 'REGEN' WHERE REPORT_ID = @id",
+                p => p.AddWithValue("@id", reportId));
+            source = "REGEN";
+        }
+
         // source is CACHE when a concurrent request won the race for this PAN+month;
-        // that is still a pull event and still counts as 1.
-        await RecordPullAsync(reportId, pan, reportType, pulledBy, pulledByName, source);
+        // this request still called the vendor, so the PENDING row is finalized OK
+        // (SOURCE stays as BeginPull recorded it) and counts exactly once.
+        await FinalizePullAsync(pullLogId, reportId, pulledBy, pulledByName, "OK", null);
 
         _logger.LogInformation("CIBIL report for PAN {Pan} pulled from API and saved as {File}.", pan, fileName);
 
@@ -806,7 +1120,9 @@ public class CibilService : ICibilService
             DownloadUrl = $"/api/cibil/download/{reportId}",
             Message = source == "CACHE"
                 ? $"A concurrent pull for PAN {pan} just saved this report — serving the saved file."
-                : "Report generated successfully.",
+                : source == "REGEN"
+                    ? "Report re-pulled by administrator."
+                    : "Report generated successfully.",
             Quota = await GetQuotaAsync(pulledBy, pulledByName)
         };
     }
