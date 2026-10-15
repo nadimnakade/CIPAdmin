@@ -30,6 +30,9 @@ public class CibilReportInfo
     public string? PulledByName { get; set; }
     public DateTime PulledDate { get; set; }
     public string Source { get; set; } = "";
+    /// <summary>Completed report rows are successful. The Reports grid displays this
+    /// explicitly so the result status is visible instead of inferred from Source.</summary>
+    public string Status { get; set; } = "OK";
 
     /// <summary>Work location of the puller, snapshotted at pull time so the grid keeps
     /// showing where a report came from even after the employee is transferred.</summary>
@@ -56,9 +59,41 @@ public class MyPullRow
     public string? ApplicantName { get; set; }
     public string ReportType { get; set; } = "";
     public string Source { get; set; } = "";
+    /// <summary>OK | FAILED | PENDING. Present since failed attempts became visible
+    /// in this list — a FAILED row has no REPORT_ID, so the Download cell is empty.</summary>
+    public string Status { get; set; } = "OK";
+    /// <summary>The vendor's failure text. Stripped for non-admins by the controller,
+    /// same rule as Check/Generate.</summary>
+    public string? ErrorMessage { get; set; }
     public string? LocationName { get; set; }
     public string? CenterManager { get; set; }
     public string? FileName { get; set; }
+    public string PullDate { get; set; } = "";
+    public string PullTime { get; set; } = "";
+}
+
+/// <summary>A pull attempt that produced NO report — FAILED or still PENDING. A failed
+/// vendor call never inserts into TBL_CIP_CIBIL_REPORTS, so the reports grid cannot
+/// show it; this row is read straight from the ledger and is the only place the
+/// attempt becomes visible.</summary>
+public class FailedPullRow
+{
+    public int LogId { get; set; }
+    /// <summary>Always null for a FAILED attempt; non-null when a later pull of the
+    /// same PAN succeeded and the ledger row was reused.</summary>
+    public int? ReportId { get; set; }
+    public string PanNo { get; set; } = "";
+    public string? ApplicantName { get; set; }
+    public string ReportType { get; set; } = "";
+    /// <summary>FAILED | PENDING.</summary>
+    public string Status { get; set; } = "";
+    public string Source { get; set; } = "";
+    /// <summary>Who attempted the pull (TBL_CIP_CIBIL_PULL_LOG.EMP_NAME).</summary>
+    public string? RequestedBy { get; set; }
+    public string? LocationName { get; set; }
+    public string? FileName { get; set; }
+    /// <summary>Vendor failure text. Stripped for non-admins by the controller.</summary>
+    public string? ErrorMessage { get; set; }
     public string PullDate { get; set; } = "";
     public string PullTime { get; set; } = "";
 }
@@ -114,11 +149,12 @@ public class CibilCheckResponse
     /// from cache. Informational; does NOT mean the caller pulled it.</summary>
     public bool Exists { get; set; }
     public CibilReportInfo? Report { get; set; }
-    /// <summary>Latest attempt when no report exists — the source of the duplicate freeze.
-    /// Scoped to the CALLER's own attempts (plus any in-flight PENDING pull).</summary>
+    /// <summary>Latest relevant attempt when no report exists. User-owned successes
+    /// preserve the duplicate-popup behavior; FAILED and PENDING attempts freeze the PAN
+    /// globally because the vendor charges for failed calls too.</summary>
     public PullAttemptInfo? LastAttempt { get; set; }
-    /// <summary>True when a previous attempt by THIS USER this month (any status) blocks
-    /// a fresh pull. Another user's attempt never blocks the caller.</summary>
+    /// <summary>True when an existing report or relevant attempt blocks a new vendor
+    /// call for this user. Failed attempts and in-flight pulls are global blocks.</summary>
     public bool Blocked { get; set; }
     /// <summary>The caller already pulled this PAN this month (directly or served from
     /// cache). Gates the "already generated — download?" popup per user, so user B's

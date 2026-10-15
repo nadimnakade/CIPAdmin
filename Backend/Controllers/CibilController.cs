@@ -28,13 +28,11 @@ public class CibilController : ControllerBase
     private bool IsAdmin => RoleId is 1 or 2;
 
     /// <summary>Check whether a report for a PAN already exists (optionally only this month's).
-    /// Also reports the latest pull ATTEMPT when no report exists: a failed attempt this
-    /// month freezes the PAN (Blocked=true) and only admins may re-pull (CanRePull).
-    /// The failure reason is redacted for non-admins.
-    /// Duplicate/popup state is per USER: only the caller's own attempts freeze the PAN
-    /// for them (PulledByMe gates the download popup), so user B pulling a PAN user A
-    /// already did gets no report — Generate serves it from cache instead. A PENDING
-    /// pull in flight by anyone still blocks, because vendor credits are shared.</summary>
+    /// Also reports the relevant latest attempt when no report exists: user-owned
+    /// successes preserve the popup behavior; a FAILED or PENDING attempt freezes the
+    /// PAN globally until next month, with admin-only explicit retry. Failure reasons
+    /// are redacted for non-admins. A same-month successful report is still served from
+    /// cache to another user without the prior-pull popup.</summary>
     [HttpPost("check")]
     public async Task<ActionResult<CibilCheckResponse>> Check([FromBody] CibilCheckRequest request)
     {
@@ -50,8 +48,8 @@ public class CibilController : ControllerBase
             Blocked = attempt != null,
             // The caller has their OWN successful pull for this PAN this month (direct
             // or cache-served) — only then may the UI offer the file back. Someone
-            // else's pull never triggers the popup. Reports pulled before the ledger
-            // existed have no OK row, so the report's owner (PULLED_BY) counts too.
+            // else's successful pull never triggers the popup. Reports pulled before
+            // the ledger existed have no OK row, so their owner (PULLED_BY) counts too.
             PulledByMe = ownAttempt?.Status == "OK"
                 || (report != null && await _cibil.GetPulledByAsync(report.ReportId) == EmpCode),
             CanRePull = IsAdmin,
@@ -65,9 +63,10 @@ public class CibilController : ControllerBase
 
     /// <summary>
     /// Generate (pull) a CIBIL report.
-    /// Rules: one pull per PAN per month for everyone, whatever the previous attempt's
-    /// status (existing PDF is returned; a FAILED attempt blocks with 409 DUPLICATE_PULL);
-    /// regular users max Cibil:MonthlyPullLimit (default 50) pulls per month (403 beyond);
+    /// Rules: one vendor call per PAN per month; existing PDFs return from cache, any
+    /// FAILED/PENDING attempt blocks globally with 409 DUPLICATE_PULL unless an admin
+    /// explicitly re-pulls; completed OK and FAILED calls each count against the
+    /// regular user's monthly Cibil:MonthlyPullLimit (default 50);
     /// re-pulls (regenerate=true) are admin-only — non-admins get 403 RE-PULL_ADMIN_ONLY.
     /// </summary>
     [HttpPost("generate")]
@@ -196,10 +195,24 @@ public class CibilController : ControllerBase
     }
 
     /// <summary>Stream a saved report PDF inline (for the viewer iframe).
-    /// Non-admins may only open reports pulled by themselves or their downline.
-    /// Legacy reports (SOURCE='LEGACY', registered from the standalone CIBIL checker)
-    /// have no owner and are company-wide — anyone can open them, since the checker
-    /// deliberately serves them to whoever requests that PAN.</summary>
+    ///
+    /// Authorisation here must AGREE with the rule that serves the report, otherwise a
+    /// user is handed a report by Generate and then refused the file — after the serve
+    /// already counted a pull against their monthly quota. Generate's RULE 3 serves the
+    /// saved PDF for ANY PAN already pulled this month by ANYONE (SOURCE=CACHE) so a
+    /// colleague's pull does not cost another vendor credit; the download of that very
+    /// report used to be refused, because the hierarchy rule only ever walks the
+    /// viewer's OWN downline — it can never contain the administrator (who sits in a
+    /// separate tree) nor even the viewer's own manager. A client asked for by a TL and
+    /// pulled by the admin was therefore unopenable.
+    ///
+    /// A report is openable when it is company-wide by one of these rules:
+    ///   * the caller is an admin;
+    ///   * SOURCE='LEGACY' — pre-migration PDFs have no owner;
+    ///   * pulled THIS month — RULE 3 would serve it to any user who asks for the PAN;
+    ///   * the ledger shows this report was already served to this caller.
+    /// Anything else (an older report, reachable only through the Reports grid) keeps
+    /// the hierarchy rule: yourself, or your downline.</summary>
     [HttpGet("download/{reportId:int}")]
     public async Task<IActionResult> Download(int reportId, [FromQuery] bool download = false)
     {
@@ -210,7 +223,13 @@ public class CibilController : ControllerBase
             var (bytes, report) = file.Value;
 
             var isLegacy = string.Equals(report.Source, "LEGACY", StringComparison.OrdinalIgnoreCase);
-            if (!IsAdmin && !isLegacy)
+            var isCurrentMonth = report.PulledDate.ToString("yyyy-MM") == DateTime.Now.ToString("yyyy-MM");
+            var mayOpen = IsAdmin
+                || isLegacy
+                || isCurrentMonth
+                || await _cibil.WasReportServedToAsync(reportId, EmpCode);
+
+            if (!mayOpen)
             {
                 var pulledBy = await _cibil.GetPulledByAsync(reportId);
                 if (pulledBy == null || !await _hierarchy.IsInScopeAsync(EmpCode, RoleId, pulledBy.Value))
@@ -304,7 +323,31 @@ public class CibilController : ControllerBase
         });
     }
 
-    /// <summary>Excel export of the reports grid. Applies the same filters and the same
+    /// <summary>Pull attempts that produced no report — FAILED and in-flight/stuck
+    /// PENDING. A failed vendor call never inserts into TBL_CIP_CIBIL_REPORTS, so these
+    /// rows are invisible to GET /reports: the pull simply "never happened" from every
+    /// screen's point of view while the PAN stays frozen for the requester.
+    ///
+    /// Admins see all company failures; other users see only their own + downline
+    /// (viewer included). The vendor's failure text is admin-only, matching Check and
+    /// Generate. SQL scopes its empty-list case fail-closed.</summary>
+    [HttpGet("failed-pulls")]
+    public async Task<ActionResult<object>> FailedPulls([FromQuery] string? search = null, [FromQuery] int take = 200)
+    {
+        var scope = await _hierarchy.GetScopeAsync(EmpCode, RoleId);
+        var rows = await _cibil.ListFailedPullsAsync(
+            scope.IsAdmin ? null : scope.SubtreeCodes, EmpCode, search, take);
+        if (!IsAdmin)
+            foreach (var r in rows) r.ErrorMessage = null;
+        return Ok(new
+        {
+            total = rows.Count,
+            rows,
+            scope = new { isAdmin = scope.IsAdmin, subtreeSize = scope.SubtreeSize }
+        });
+    }
+
+    /// <summary>Excel export of the reports grid. Applies the same filters and the same</summary>
     /// hierarchy scope as GET /api/cibil/reports, and exports the FULL filtered set
     /// rather than the page the user is looking at.
     ///
@@ -378,11 +421,14 @@ public class CibilController : ControllerBase
 
     /// <summary>The caller's own CIBIL pull events — backs the TL tab's "My Reports"
     /// section. Scoped to the caller's own EMP_CODE with no hierarchy expansion, so a TL
-    /// never sees another employee's pulls.</summary>
+    /// never sees another employee's pulls. Includes FAILED/PENDING attempts; the
+    /// vendor's failure text is redacted for non-admins.</summary>
     [HttpGet("my-reports")]
     public async Task<ActionResult<object>> MyReports([FromQuery] int take = 100)
     {
         var rows = await _cibil.ListMyPullsAsync(EmpCode, take);
+        if (!IsAdmin)
+            foreach (var r in rows) r.ErrorMessage = null;
         return Ok(new { total = rows.Count, rows });
     }
 }

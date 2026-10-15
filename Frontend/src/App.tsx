@@ -31,6 +31,7 @@ import AccessControlPage from './pages/AccessControlPage';
 import AuthenticatorAdminPage from './pages/AuthenticatorAdminPage';
 import ErrorLogsPage from './pages/ErrorLogsPage';
 import SettingsPage from './pages/SettingsPage';
+import PdfEditorPage from './pages/PdfEditorPage';
 import TopProgressBar from './components/TopProgressBar';
 import ToastStack from './components/ToastStack';
 import ConfirmDialog from './components/ConfirmDialog';
@@ -103,6 +104,19 @@ export default function App() {
           <Route path="error-logs" element={<ErrorLogsPage />} />
           <Route path="role-master" element={<RoleMasterPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          {/* Admin-only: the editor rewrites CIBIL report PDFs, so a non-admin who
+              typed the URL by hand must not reach it. The sidebar entry is hidden
+              separately by useMenus; this guard is the actual enforcement. */}
+          <Route
+            path="pdf-editor"
+            element={
+              user && (user.roleId === 1 || user.roleId === 2) ? (
+                <PdfEditorPage />
+              ) : (
+                <Navigate to="/" replace />
+              )
+            }
+          />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

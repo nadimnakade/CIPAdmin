@@ -86,6 +86,10 @@ interface MyPullRow {
   applicantName: string | null;
   reportType: string;
   source: string;
+  /** OK | FAILED | PENDING. A FAILED row has no reportId, so it cannot be downloaded. */
+  status: string;
+  /** Vendor failure text — the server sends it to admins only. */
+  errorMessage: string | null;
   locationName: string | null;
   centerManager: string | null;
   fileName: string | null;
@@ -95,6 +99,11 @@ interface MyPullRow {
 
 /** Canonical PAN shape — 5 letters, 4 digits, 1 letter. Input is uppercased first. */
 const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+
+/** Ledger status -> badge class. FAILED gets its own colour so a failed pull can be
+    told apart from a successful one at a glance in "My Reports". */
+const statusBadge = (s: string) =>
+  s === 'OK' ? 'badge green' : s === 'PENDING' ? 'badge pending' : 'badge red';
 
 const thisMonthKey = () => {
   const d = new Date();
@@ -156,6 +165,11 @@ export default function CibilCheckerPage() {
   const checkCacheRef = useRef<{ key: string; data: CheckResponse } | null>(null);
 
   const pendingRequest = myRequests.find((r) => r.status === 'Pending' && r.requestMonth === thisMonthKey());
+
+  // "My Reports" lists every attempt, successes included — the chip must not call a
+  // failed attempt a pull, so successes and failures are counted separately.
+  const failedPulls = myReports.filter((r) => r.status !== 'OK').length;
+  const okPulls = myReports.length - failedPulls;
 
   const refreshQuota = useCallback(() => {
     api.get<QuotaInfo>('/api/cibil/quota').then(setQuota).catch(() => {});
@@ -696,7 +710,11 @@ export default function CibilCheckerPage() {
         <div className="card my-reports">
           <div className="card-head">
             <h3>My Reports</h3>
-            <span className="scope-chip">{myReports.length} pull{myReports.length === 1 ? '' : 's'}</span>
+            <span className="scope-chip">
+              {failedPulls > 0
+                ? `${okPulls} pull${okPulls === 1 ? '' : 's'} · ${failedPulls} failed`
+                : `${myReports.length} pull${myReports.length === 1 ? '' : 's'}`}
+            </span>
           </div>
           <table className="data-table">
             <thead>
@@ -705,6 +723,7 @@ export default function CibilCheckerPage() {
                 <th>PAN</th>
                 <th>Type</th>
                 <th>Source</th>
+                <th>Status</th>
                 <th>Location</th>
                 <th>CIBIL Pull Date</th>
                 <th>CIBIL Pull Time</th>
@@ -721,6 +740,14 @@ export default function CibilCheckerPage() {
                     <span className={'badge ' + (r.source === 'API' || r.source === 'REGEN' ? 'green' : 'gray')}>
                       {r.source}
                     </span>
+                  </td>
+                  <td>
+                    <span className={statusBadge(r.status)}>{r.status}</span>
+                    {r.errorMessage && (
+                      <div className="row-reason" title="Vendor's failure reason for this attempt">
+                        {r.errorMessage}
+                      </div>
+                    )}
                   </td>
                   <td>{r.locationName || '—'}</td>
                   <td>{r.pullDate}</td>

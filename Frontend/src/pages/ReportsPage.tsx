@@ -14,6 +14,7 @@ interface ReportRow {
   pulledByName: string | null;
   pulledDate: string;
   source: string;
+  status: 'OK' | 'FAILED' | 'PENDING' | string;
   locationName: string | null;
   centerManager: string | null;
   pullDate: string;
@@ -30,6 +31,24 @@ interface PortalUsage {
   vendor: { available: boolean; balance: number | null; message: string | null; checkedOn: string };
 }
 
+/** A pull attempt that produced no report (FAILED / PENDING). Read from the ledger —
+ * a failed vendor call never inserts into TBL_CIP_CIBIL_REPORTS, so the grid above
+ * cannot show it. `errorMessage` is null for non-admins (the server redacts it). */
+interface FailedPullRow {
+  logId: number;
+  reportId: number | null;
+  panNo: string;
+  applicantName: string | null;
+  reportType: string;
+  status: string;
+  source: string;
+  requestedBy: string | null;
+  locationName: string | null;
+  errorMessage: string | null;
+  pullDate: string;
+  pullTime: string;
+}
+
 const fmtDate = (iso: string) => {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -44,6 +63,8 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [usage, setUsage] = useState<PortalUsage | null>(null);
+  const [failed, setFailed] = useState<FailedPullRow[]>([]);
+  const [failedError, setFailedError] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
 
@@ -84,6 +105,21 @@ export default function ReportsPage() {
   }, [isAdmin]);
 
   useEffect(() => { loadUsage(); }, [loadUsage]);
+
+  // Failed pull attempts. Independent of the grid's own load so a ledger problem can
+  // never take the reports table down with it.
+  const loadFailed = useCallback(() => {
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    api.get<{ total: number; rows: FailedPullRow[] }>('/api/cibil/failed-pulls?' + params.toString())
+      .then((d) => setFailed(d.rows))
+      .catch((e) => setFailedError(e instanceof Error ? e.message : 'Failed to load failed attempts'));
+  }, [search]);
+
+  useEffect(() => {
+    const t = setTimeout(loadFailed, search ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [loadFailed]);
 
   const viewPdf = async (r: ReportRow) => {
     const blob = await fetchReportPdf(r.reportId);
@@ -128,6 +164,7 @@ export default function ReportsPage() {
       <div className="page-head">
         <div>
           <h1>Reports</h1>
+          {isAdmin && <p className="page-sub">Successful pulls show status here; failed vendor attempts appear in the Failed Pull Attempts list below.</p>}
           <p className="page-sub">
             Pulled bureau reports with their stored PDFs
             <span className="scope-chip" title={isAdmin ? 'You can see every report in the company' : 'You see reports pulled by you and your downline'}>
@@ -221,6 +258,7 @@ export default function ReportsPage() {
                     <SortArrow active={view.sort.key === key} dir={view.sort.dir} />
                   </th>
                 ))}
+                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -245,6 +283,7 @@ export default function ReportsPage() {
                   </td>
                   <td>{fmtDate(r.pullDate)}</td>
                   <td className="mono">{r.pullTime || '—'}</td>
+                  <td><span className="badge green">{r.status || 'OK'}</span></td>
                   <td>
                     <div className="row-actions">
                       <button className="btn small" onClick={() => viewPdf(r)}>
@@ -259,7 +298,7 @@ export default function ReportsPage() {
               ))}
               {view.pageRows.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="empty">
+                  <td colSpan={12} className="empty">
                     No reports found.
                   </td>
                 </tr>
@@ -277,6 +316,60 @@ export default function ReportsPage() {
           onPageSize={view.setPageSize}
         />
       </div>
+
+      {failedError && <div className="alert error">{failedError}</div>}
+
+      {failed.length > 0 && (
+        <div className="card failed-pulls">
+          <div className="card-head">
+            <h3>All Failed Pull Attempts</h3>
+            <span className="scope-chip" title="Every failed vendor call is recorded here. The requester is charged one monthly credit because the vendor bills failed calls too. Other users are blocked from retrying the same PAN until an admin explicitly re-pulls it.">
+              {failed.length} attempt{failed.length === 1 ? '' : 's'} with no report
+            </span>
+          </div>
+          <p className="page-sub">
+            {isAdmin
+              ? 'Company-wide failed attempts; each vendor call consumed one credit. Re-pull from CIBIL Checker when an intentional retry is needed.'
+              : 'Failed pulls by you and your downline. A failure consumes one monthly credit for the requester; everyone is blocked from retrying that PAN until next month or an admin re-pull.'}
+          </p>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>PAN</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Status</th>
+                <th>Requested By</th>
+                <th>Location</th>
+                <th>Pull Date</th>
+                <th>Pull Time</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failed.map((r, i) => (
+                <tr key={r.logId}>
+                  <td>{i + 1}</td>
+                  <td className="mono">{r.panNo}</td>
+                  <td><span className="badge blue">{r.reportType}</span></td>
+                  <td><span className="badge gray">{r.source}</span></td>
+                  <td>
+                    <span className={r.status === 'PENDING' ? 'badge pending' : 'badge red'}>
+                      {r.status}
+                    </span>
+                  </td>
+                  <td>{r.requestedBy || '—'}</td>
+                  <td>{r.locationName || '—'}</td>
+                  <td>{fmtDate(r.pullDate)}</td>
+                  <td className="mono">{r.pullTime || '—'}</td>
+                  <td className="fail-reason">{r.errorMessage || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

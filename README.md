@@ -9,7 +9,7 @@ Full-stack admin portal: **React 18 + TypeScript (Vite)** frontend, **ASP.NET Co
 | **Login** (1UP card UI) | JWT auth, port of the legacy `Chk_Credential`. Google Authenticator second factor driven entirely by the per-employee `IS_BYPASS` flag, exactly like the legacy portal: **`IS_BYPASS = 1` → straight to the dashboard**, **`IS_BYPASS = 0` → the authenticator is mandatory**. An enrolled user is asked for a 6-digit code (`require_otp`); a user who has never enrolled gets a QR code to scan (`enroll_otp`) and completes setup with the first valid code. "Remember me" extends token lifetime. |
 | **Authenticator Setup** (admin) | Manages the second factor per employee, replacing the legacy `Verify/ResetGoogleAuth` screen. Lists each employee's required/not-required state and whether they are enrolled. **Reset** clears the stored secret so a user with a lost phone re-scans a QR at next login (it deliberately does *not* touch `IS_BYPASS`, since flipping that would silently switch the second factor off). **Require it / Stop requiring** flips `IS_BYPASS` for one employee. Granted to SUPER ADMIN and ADMIN only — the API returns 403 to any other role, so the menu grant matches the endpoint exactly. |
 | **Dashboard** | Stat cards (CIBIL pulled today + Δ, total reports + Δ, active employees, active DIDs), 7-day trend line chart, reports-by-type donut. |
-| **CIBIL Checker** | Form matching the shared UI with a monthly **quota chip** (used/limit + progress bar). Four rules enforced server-side: **(1) Monthly pull limit** — regular users get `Cibil:MonthlyPullLimit` (default 50) pulls/month, HTTP 403 + a limit-request form beyond that; **(2) Admin-only re-pull** — `?regenerate=true` is accepted for admins (ROLE_ID 1/2) only; anyone else gets 403 `RE-PULL_ADMIN_ONLY`, whatever the previous pull's status; **(3) One pull per PAN per month** — any user pulling a PAN already done this month (by anyone) gets the saved PDF back (`source=CACHE`, no API call); a pull from a *previous* month doesn't block; **(4) Attempt freeze regardless of status — per user** — a PAN whose only history this month is *your own* FAILED attempt blocks *you* with 409 `DUPLICATE_PULL` until an admin re-pulls, so retries can no longer burn vendor credits; a colleague's failure does not lock you out (you get a fresh attempt, and a colleague's *successful* pull is served to you as `source=CACHE`, counting one pull for you). Only an in-flight `PENDING` pull still blocks everyone, since vendor credits are shared (the ledger row in `TBL_CIP_CIBIL_PULL_LOG` is consulted, not just report rows; the vendor's failure reason in `ERROR_MESSAGE` is returned to admins only). Fresh pulls are saved to `pdf files/<User>/` and recorded in `TBL_CIP_CIBIL_REPORTS` — unique index on (PAN_NO, REPORT_TYPE, PULL_MONTH) so even concurrent pulls of the same PAN in one month can't duplicate, plus a `PENDING`-only unique index that keeps one vendor call per PAN in flight. Admins bypass the quota; the quota only counts *fresh* pulls, cached returns are free (FAILED attempts cost no allowance). **Client-side flow** — the PAN is validated when the field loses focus, not on the Pull button: a bad format shows an inline error, a PAN **this user already pulled** this month asks *“CIBIL for this PAN is already generated. Do you want to download the file?”* and serves the cached PDF on confirm (cancel does nothing) — the popup is scoped per user (`pulledByMe`), so a report pulled by a colleague never pops it up; Generate just serves it from cache and counts the pull for the current user. Once a pull is initiated the Pull button stays disabled through the response — success or failure alike — until the user clicks **Refresh** next to the message *“Click on Refresh to enable the button.”* |
+| **CIBIL Checker** | Form matching the shared UI with a monthly **quota chip** (used/limit + progress bar). Regular users have a configurable monthly pull limit (default 50); admins bypass it. Only admins may use `?regenerate=true`. Same-month successful reports are served from cache, with one requester quota credit and no second vendor call. A failed vendor attempt freezes that PAN for everyone for the rest of the month, since each vendor request costs about ₹40 whether it succeeds or fails; only an explicit admin re-pull bypasses the freeze. Each completed `OK` or `FAILED` vendor call consumes one credit from its requester; blocked retries and in-flight `PENDING` requests do not. Failure reasons are visible to admins only. Attempts appear in My Reports and the Failed Pull Attempts list; saved Reports rows explicitly display `Status=OK`. |
 | **Employees (DID Management)** | `TBL_CIP_EMPLOYEE_DID` (references `TBL_CIP_EMPLOYEE_MASTER.EMP_CODE`). `DID_NUMBER` stores the **SIP username**; `EXTENSION_NUMBER` is a persisted computed column = last 3 characters of the SIP username. Summary tiles, inline Assign panel (employee picker auto-fills code/name/designation; extension auto-fills from SIP username), search (matches name/code/SIP username/extension), status + designation filters, Excel export, change SIP username (history kept in `TBL_CIP_EMPLOYEE_DID_HISTORY`), release (soft delete). Duplicate SIP usernames rejected server-side (HTTP 409). |
 | **Employee Master** | Server-paged view of all 10k+ employees in `TBL_CIP_EMPLOYEE_MASTER`: search by name/code/email, designation + active filters, server-side column sorting. Each row has **Documents** and **Offer Letter** actions. |
 | **Company Category** | Port of CIPPortal's CompanyCategory module on `TBL_CIP_COMPANY_CATEGORY` (1.7M+ rows, served 1 row per company via MAX(COMPANY_KEY)). Bulk **.xlsx upload** with Product + Bank (legacy "Company Name"/"Final Category" format, deduped per product+bank), paged/filterable/sortable grid, inline edit, delete. |
@@ -35,34 +35,25 @@ Admins (ROLE_ID 1/2) see all data. Every other role sees only their **reporting 
 | `GET /api/employees/master` | only subtree employees |
 | `GET /api/employees/dids` (+ `stats`, `export`, `without-did`) | only subtree assignments (generic DID rows visible to all) |
 | `GET /api/cibil/reports` | only reports pulled by self + downline |
-
-## CIBIL pull counting
-
-Monthly pull usage is counted from **`TBL_CIP_CIBIL_PULL_LOG`** (the pull ledger), not from
-`TBL_CIP_CIBIL_REPORTS`. The report table holds one row per *report artefact* — one PAN per
-month — so counting it made cached pulls invisible and credited usage to whoever first pulled
-a PAN. That is what produced the "0 / 10" quota bug: a TL whose PANs had all been pulled by
-colleagues showed 0.
-
-One ledger row is written per **pull event**, and every event counts:
-
-| Event | Counts toward the monthly limit | Consumes a vendor credit |
-|---|---|---|
-| Fresh pull (`API`) | yes | yes |
-| Admin regenerate (`REGEN`) | yes | yes |
-| Served from this month's cache (`CACHE`) | yes | no |
-| Served from a legacy PDF (`LEGACY`) | yes | no |
-| Vendor call failed (`STATUS='FAILED'`) | **no** | attempt only |
-| Re-downloading from the Reports grid | no | no |
-
-`STATUS='FAILED'` is excluded from quota counts, so a vendor error never burns a user's
-allowance. A pull blocked by the limit (HTTP 403) writes no row, so retrying cannot inflate
-the count. See `Backend/sql/CIBIL-PULL-LOG.sql` (idempotent, run once per database) and
-`docs/CIBIL-REPORTS-SPEC.md` for the full specification.
 | `GET /api/cibil/file/{id}` | 403 when the puller is outside the subtree |
 | `GET /api/dialer/live` | scoped inside the legacy SP via `@UserKey` |
 | `GET /api/dashboard` | cards + trend reflect the subtree |
 | `GET /api/menus` | menus for the caller's role (Menu Master) |
+
+## CIBIL pull counting
+
+Monthly usage comes from **`TBL_CIP_CIBIL_PULL_LOG`**, not report rows; this captures cached usage under the requester and fixes the "0 / 10" quota bug.
+
+| Event | Counts toward the monthly limit | Consumes a vendor credit |
+|---|---|---|
+| Fresh pull (`API`) or admin regenerate (`REGEN`) | yes | yes |
+| Served from cache (`CACHE`) or legacy PDF (`LEGACY`) | yes | no |
+| Vendor call failed (`STATUS='FAILED'`) | **yes (1)** | yes — failed calls are billed too |
+| Duplicate blocked before a vendor call / PDF re-download | no | no |
+
+Admins can see all reports and failed attempts. Regular users see the reports and attempts within their own reporting team; failure reasons remain admin-only.
+
+A failed PAN is frozen globally for the rest of the month; only an admin can explicitly re-pull. Failed calls consume one requester credit; blocked repeats do not. Failure reasons are admin-only. See `Backend/sql/CIBIL-PULL-LOG.sql`, `Backend/sql/CIBIL-DEDUPE-FAILED.sql`, and `docs/CIBIL-REPORTS-SPEC.md` for details.
 
 ## Configuration
 
@@ -116,8 +107,8 @@ npm run dev
 | POST | `/api/auth/verify-otp` | `{username,code}` → JWT |
 | GET | `/api/auth/session` | current user from JWT |
 | GET | `/api/dashboard` | cards + trend + byType |
-| POST | `/api/cibil/generate?regenerate=` | cache-first PAN logic + monthly quota + admin regen; `{source:CACHE\|API\|REGEN, report, downloadUrl, quota}`; 403 `{code:QUOTA_EXCEEDED, quota, existingReport, hasPendingRequest}` on limit reached; 409 `{code:DUPLICATE_PULL, lastAttempt, canRePull}` when the caller attempted the PAN this month (any status — a colleague's attempt doesn't block; an in-flight PENDING pull by anyone still does); 403 `{code:RE-PULL_ADMIN_ONLY}` when a non-admin passes `regenerate=true` |
-| POST | `/api/cibil/check` | `{pan,reportType}` → `{exists, report, lastAttempt, blocked, pulledByMe, canRePull}` (this month only; `lastAttempt`/`blocked` reflect the caller's own attempts plus any in-flight PENDING pull; `pulledByMe` gates the per-user download popup; `lastAttempt.errorMessage` is sent to admins only) |
+| POST | `/api/cibil/generate?regenerate=` | cache-first PAN logic + monthly quota + admin regen; `{source:CACHE\|API\|REGEN, report, downloadUrl, quota}`; 403 `{code:QUOTA_EXCEEDED, quota, existingReport, hasPendingRequest}` on limit reached; 409 `{code:DUPLICATE_PULL, lastAttempt, canRePull}` when this user's successful pull, any user's failed pull, or any user's in-flight PENDING pull blocks the PAN this month; only an admin can re-pull after failure; 403 `{code:RE-PULL_ADMIN_ONLY}` when a non-admin passes `regenerate=true` |
+| POST | `/api/cibil/check` | `{pan,reportType}` → `{exists, report, lastAttempt, blocked, pulledByMe, canRePull}` (this month only; successful-pull popup state is per-user, but `lastAttempt`/`blocked` also reflect a global FAILED or in-flight PENDING attempt; `pulledByMe` gates the per-user download popup; `lastAttempt.errorMessage` is sent to admins only) |
 | GET | `/api/cibil/quota` | current user's monthly quota `{used, limit, remaining, effectiveLimit, approvedLimit}` |
 | POST | `/api/cibil/limit-request` | user requests a higher monthly limit `{requestedLimit, reason}` |
 | GET | `/api/cibil/my-limit-requests` | the current user's own limit requests |

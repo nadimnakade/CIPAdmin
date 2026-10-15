@@ -58,6 +58,28 @@ export const FALLBACK_NAV: NavGroup[] = [
   { label: 'Settings', icon: 'settings', to: '/settings' },
 ];
 
+/** The PDF editor is an Admin-only screen that lives under the CIBIL section.
+ *  It is injected/removed here so the sidebar rule holds no matter where the rest
+ *  of the menu came from — the DB grant is what the API enforces, but this keeps
+ *  the rule true even before Backend/sql/PDF-EDITOR-MENU.sql has been run (and
+ *  strips the entry again if a grant was ever added for a non-admin role). */
+const PDF_EDITOR_LEAF: NavGroup = { label: 'PDF Editor', to: '/pdf-editor' };
+
+function applyPdfEditorRule(nav: NavGroup[], isAdmin: boolean): NavGroup[] {
+  const hasLeaf = (g: NavGroup) => g.children?.some((c) => c.to === '/pdf-editor') || g.to === '/pdf-editor';
+  if (!isAdmin) {
+    return nav
+      .filter((g) => g.to !== '/pdf-editor')
+      .map((g) => (g.children ? { ...g, children: g.children.filter((c) => c.to !== '/pdf-editor') } : g));
+  }
+  if (nav.some(hasLeaf)) return nav;
+  const cibil = nav.find((g) => !g.to && g.label.toUpperCase() === 'CIBIL');
+  if (!cibil?.children) return nav;
+  return nav.map((g) =>
+    g === cibil ? { ...g, children: [...g.children!, PDF_EDITOR_LEAF] } : g
+  );
+}
+
 interface ApiMenuNode {
   menuId: number;
   label: string;
@@ -71,7 +93,7 @@ interface ApiMenuNode {
 export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
   const [nav, setNav] = useState<NavGroup[]>(() => {
     if (isAdmin) {
-      return [
+      return applyPdfEditorRule([
         ...FALLBACK_NAV.slice(0, 4),
         {
           label: 'Administration',
@@ -85,9 +107,9 @@ export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
           ],
         },
         FALLBACK_NAV[4],
-      ];
+      ], isAdmin);
     }
-    return FALLBACK_NAV;
+    return applyPdfEditorRule(FALLBACK_NAV, isAdmin);
   });
 
   useEffect(() => {
@@ -104,7 +126,7 @@ export function useMenus(isAdmin: boolean, reloadKey = 0): NavGroup[] {
             external: isExternalUrl(n.path),
             children: n.children?.length ? map(n.children) : undefined,
           }));
-        const translated = map(nodes);
+        const translated = applyPdfEditorRule(map(nodes), isAdmin);
         // Administration group is authoritative from the DB when present;
         // otherwise admins still get it so they can reach Menu Master.
         const hasAdmin = translated.some((g) => g.label === 'Administration');

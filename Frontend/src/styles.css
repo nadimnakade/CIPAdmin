@@ -1014,6 +1014,32 @@ body {
   color: var(--primary);
 }
 
+/* FAILED ledger status. Deliberately red rather than gray: a failed pull still
+   freezes the PAN for the requester, so it must not read as "nothing happened". */
+.badge.red {
+  background: var(--red-light);
+  color: var(--red);
+}
+
+/* Failure reason under a status badge in "My Reports". Muted and clamped so one
+   long vendor message cannot stretch the table. */
+.row-reason {
+  margin-top: 3px;
+  max-width: 34ch;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+
+/* Reason column of the Failed Pull Attempts table. */
+.failed-pulls .fail-reason {
+  max-width: 42ch;
+  color: var(--red);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .row-actions {
   display: flex;
   gap: 6px;

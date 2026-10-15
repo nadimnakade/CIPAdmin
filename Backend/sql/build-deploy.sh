@@ -37,6 +37,14 @@ rm -rf dist
 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' VITE_BASE=/CIPadmin/ VITE_API_BASE=/CIPAdmin_API \
   ./node_modules/.bin/vite build
 
+# Emitted-asset gate. Everything above inspects SOURCE; this inspects what vite
+# actually wrote to dist/, and stops before wwwroot/zip if the bundle would 404 in
+# production - i.e. index.html pointing at /assets/... (built without VITE_BASE) or a
+# .mjs asset (IIS has no MIME mapping for it, so the PDF.js worker dies). Same env as
+# the build above, so it validates against the base the bundle really carries.
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' VITE_BASE=/CIPadmin/ VITE_API_BASE=/CIPAdmin_API \
+  node tools/check-dist.mjs
+
 echo "==> [3/5] mirroring the SPA into Backend/wwwroot (single-site mode)"
 rm -rf "$ROOT/Backend/wwwroot"
 mkdir -p "$ROOT/Backend/wwwroot"

@@ -17,6 +17,7 @@ const BREADCRUMBS: Record<string, string[]> = {
   '/cibil': ['CIBIL', 'Checker'],
   '/bsa-analyzer': ['CIBIL', 'Bank Statement Analyzer'],
   '/financial-analysis': ['CIBIL', 'Financial Analysis'],
+  '/pdf-editor': ['CIBIL', 'PDF Editor'],
   '/employees': ['Employees', 'DID Management'],
   '/employee-master': ['Masters', 'Employee Master'],
   '/company-categories': ['Masters', 'Company Category'],

@@ -265,8 +265,8 @@ To make the *label* honest rather than misleading, the column header carries a t
 
 ### 5.1 Definitions
 
-- **Pull event** = one completed `POST /api/cibil/generate` that returned a report to the user, whether or not the vendor was called.
-- **Portal pull** = a pull event with `SOURCE` in (`API`, `REGEN`) — these are the only events that consume vendor CIBIL credits.
+- **Pull event** = one request made through `POST /api/cibil/generate`, whether it reaches the vendor or is served from saved data.
+- **Portal pull** = a call to the CIBIL vendor, recorded with `SOURCE` in (`API`, `REGEN`), including failed calls.
 - **Quota window** = the calendar month, keyed by the log row's `PULL_MONTH` (`yyyy-MM`, server local/IST).
 
 ### 5.2 Rules
@@ -277,32 +277,32 @@ To make the *label* honest rather than misleading, the column header carries a t
 | Admin *Regenerate* of an existing PAN | yes | `REGEN` | **yes (1)** | yes |
 | Same PAN, same month, served from cache | **yes** | `CACHE` | **yes (1)** | no |
 | Same PAN, served from a legacy PDF | **yes** | `LEGACY` | **yes (1)** | no |
-| Vendor call failed (error surfaced to user) | yes | `API` with `STATUS='FAILED'` and `REPORT_ID` NULL | **no** | attempt only |
+| Vendor call failed (error surfaced to user) | yes | `API` with `STATUS='FAILED'` and `REPORT_ID` NULL | **yes (1)** | yes — failed calls are billable |
 | Rejected because the monthly limit was already reached (HTTP 403) | no | — | no | no |
 | PDF viewed or downloaded again from the Reports grid | no (no new pull event) | — | no | no |
 
-**Every successful pull counts once, cached or not.** A TL can therefore exhaust their own monthly allowance by repeatedly pulling PANs that are already on file — which is the intended behaviour in this requirement.
+**Every completed vendor call counts once, whether it succeeds or fails.** Cache and legacy serves also count as pull events, while requests blocked before the vendor call do not consume credits. A TL can therefore exhaust their own monthly allowance by repeatedly requesting reports already on file.
 
-### 5.3 Where the log row is written
+### 5.3 How attempts are recorded and blocked
 
-Inside `CibilService.GenerateAsync`, in a single place, immediately before each return path, via one private helper `RecordPullAsync(...)`. The order is deliberate: **log first, then return the response**, so a pull that succeeds is always counted even if the HTTP response is later lost. Failed vendor calls are logged with `STATUS='FAILED'` and excluded from quota counts (filter `STATUS = 'OK'`).
+The service opens a `PENDING` ledger entry before calling the vendor and finalizes it to `OK` or `FAILED`. A failed vendor response still counts against the original requester's monthly quota, because the vendor bills failed calls. Any user's same-month `FAILED` attempt freezes that PAN globally before another request reaches the paid API; `PENDING` also blocks globally while in flight. Only an explicit admin re-pull may bypass a completed failure. Duplicate attempts blocked before calling the vendor consume no additional quota or vendor credit.
 
-Because the log is written on every path, the existing rule "quota only counts fresh pulls, cached returns are free" is intentionally reversed. This is the only behavioural regression risk in the change and is called out in Assumptions.
+Cache and legacy serves count as requester pull events, even though they do not call the vendor.
 
 ### 5.4 Derived counts
 
 | Figure | Query source |
 |---|---|
-| TL `used` | `COUNT(1) FROM TBL_CIP_CIBIL_PULL_LOG WHERE EMP_CODE = @e AND PULL_MONTH = @m AND STATUS='OK'` |
-| Admin portal total (tile A7) | `COUNT(1) … WHERE SOURCE IN ('API','REGEN') AND STATUS='OK'` (optionally date-bounded) |
+| TL `used` | `COUNT(1) FROM TBL_CIP_CIBIL_PULL_LOG WHERE EMP_CODE = @e AND PULL_MONTH = @m AND STATUS IN ('OK','FAILED')` |
+| Admin portal total (tile A7) | `COUNT(1) … WHERE SOURCE IN ('API','REGEN') AND STATUS IN ('OK','FAILED')` (optionally date-bounded) |
 | Admin month / period totals | same, filtered on `PULL_MONTH` or `PULLED_DATE` |
 | Reports-grid row count | unchanged — count of `TBL_CIP_CIBIL_REPORTS` rows in scope |
 
 The quota check inside `GenerateAsync` moves from counting report rows to counting log rows; the rest of `QuotaInfo` (`limit`, `effectiveLimit`, `approvedLimit`, `remaining`) is computed exactly as today.
 
-### 5.5 Backfill
+### 5.5 Existing history
 
-Existing history has no log rows, so pre-deployment usage cannot be recovered exactly. On first deploy, a one-off script inserts a single `SOURCE='BACKFILL'` row per existing `TBL_CIP_CIBIL_REPORTS` row with `PULLED_BY` and `PULL_MONTH` in the current month, so the current month's numbers start from the true count rather than zero. Older months are deliberately not backfilled. `BACKFILL` is not a valid value for new writes and is treated as non-portal for counting.
+Historical attempts made before the pull ledger was deployed cannot be reconstructed exactly. New calls use ledger status and pull date for quota and freeze decisions.
 
 ---
 
@@ -329,11 +329,11 @@ WHERE PULLED_BY = @e AND PULL_MONTH = @m
 - TL generates a fresh PAN → chip reads `1 / 10`.
 - TL generates the same PAN again → chip reads `2 / 10`, and the response carries the refreshed `quota` object.
 - TL generates a PAN already pulled by a colleague → chip reads `1 / 10` for the TL (it did not before).
-- After 10 successful pulls the 11th request returns HTTP 403 with the accurate `used = 10` and opens the limit-request panel.
+- After 10 completed pulls the next request returns HTTP 403 with the accurate `used = 10` and opens the limit-request panel.
 - The chip can no longer read `0` once any pull in the month has been made by that employee.
-- A failed vendor call does not consume quota.
+- A failed vendor call consumes exactly one requester quota credit; retries blocked before the vendor call consume none.
 
-**Regression risk.** TLs who relied on unlimited cached pulls will start hitting their limit. Mitigations: the current-month backfill (§5.5) keeps their existing count visible, and the limit-request approval path already lets an admin raise an individual TL's cap.
+**Quota behavior.** Cached pulls count against the requesting user's monthly limit. A paid vendor call that fails also consumes exactly one credit; blocked duplicates make no vendor call and add no further credit.
 
 ---
 
@@ -357,7 +357,7 @@ WHERE PULLED_BY = @e AND PULL_MONTH = @m
 
 ## 8. Implementation Order (proposed)
 
-1. Schema script `Database/CIBIL-PULL-LOG.sql` — create `TBL_CIP_CIBIL_PULL_LOG`, add the three columns to `TBL_CIP_CIBIL_REPORTS`, add the current-month backfill.
+1. Schema script `Database/CIBIL-PULL-LOG.sql` — create `TBL_CIP_CIBIL_PULL_LOG` and add the report snapshot columns.
 2. Backend: `RecordPullAsync` in `CibilService`, wired into all `GenerateAsync` return paths; `GetQuotaAsync` switched to the log.
 3. Backend: `locationName` / `centerManager` / `pullDate` / `pullTime` on `CibilReportInfo` and the `reports` query (join `TBL_CIP_LOCATION_MASTER` where the snapshot is null; `centerManager` from `PULLED_BY_NAME` per §3.5).
 4. Backend: `GET /api/cibil/reports/export` and the `ExcelExporter` time-style addition.
